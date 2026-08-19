@@ -347,6 +347,46 @@ impl Algo0x11 {
         }
         sum
     }
+
+    /// `compress`'in ürettiği akışı geri çözer (test/teşhis amaçlı).
+    /// Format spec'inin (bkz. gerçek SpliX algo0x11.cpp) ters uygulamasıdır.
+    #[cfg(test)]
+    pub fn decompress(data: &[u8]) -> Vec<u8> {
+        let uncomp_size = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let mut ptr_array = [0u16; TABLE_PTR_SIZE];
+        for i in 0..TABLE_PTR_SIZE {
+            let off = 4 + i * 2;
+            ptr_array[i] = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+        }
+        let table_end = 4 + TABLE_PTR_SIZE * 2;
+        let mut out = Vec::new();
+        out.extend_from_slice(&data[table_end..table_end + uncomp_size]);
+
+        let mut pos = table_end + uncomp_size;
+        while pos < data.len() {
+            let b0 = data[pos];
+            if b0 & COMPRESSION_FLAG != 0 {
+                let b1 = data[pos + 1];
+                let comp_len = ((b0 & 0x7F) as u16) | ((((b1 >> 6) & 0x3) as u16) << 7);
+                let ptr_idx = (b1 & 0x3F) as usize;
+                let offset = ptr_array[ptr_idx] as usize;
+                let match_len = comp_len as usize + 3;
+                let mut ref_pos = out.len() - offset;
+                for _ in 0..match_len {
+                    let b = out[ref_pos];
+                    out.push(b);
+                    ref_pos += 1;
+                }
+                pos += 2;
+            } else {
+                let count = (b0 as usize) + 1;
+                pos += 1;
+                out.extend_from_slice(&data[pos..pos + count]);
+                pos += count;
+            }
+        }
+        out
+    }
 }
 
 // ============================================================================
@@ -368,14 +408,20 @@ impl<W: Write> SplStreamWriter<W> {
 
     /// Samsung ML-2160 serisi PJL Başlığını gönderir.
     pub fn begin_job(&mut self, config: &JobConfig) -> io::Result<()> {
+        // Gerçek SpliX (printer.cpp sendPJLHeader) sırası: UEL'den sonra doğrudan
+        // "@PJL DEFAULT SERVICEDATE=..." ile başlar; ayrı bir çıplak "@PJL\n" satırı
+        // GÖNDERİLMEZ. PowerSave/JamRecovery satırları da ml2160.ppd varsayılanlarına
+        // göre (PowerSave=5, JamRecovery=False) her zaman gönderilir.
         let mut pjl = Vec::with_capacity(256);
         pjl.extend_from_slice(PJL_UEL);
-        pjl.extend_from_slice(b"@PJL\n");
         pjl.extend_from_slice(
             format!("@PJL DEFAULT SERVICEDATE={}\n", config.service_date).as_bytes(),
         );
         pjl.extend_from_slice(format!("@PJL SET USERNAME=\"{}\"\n", config.user_name).as_bytes());
         pjl.extend_from_slice(format!("@PJL SET JOBNAME=\"{}\"\n", config.job_name).as_bytes());
+        pjl.extend_from_slice(b"@PJL DEFAULT POWERSAVE=ON\n");
+        pjl.extend_from_slice(b"@PJL DEFAULT POWERSAVETIME=5\n");
+        pjl.extend_from_slice(b"@PJL SET JAMRECOVERY=OFF\n");
         pjl.extend_from_slice(b"@PJL SET DUPLEX=OFF\n");
         pjl.extend_from_slice(b"@PJL SET PAPERTYPE=OFF\n");
         pjl.extend_from_slice(b"@PJL SET ALTITUDE=LOW\n");
@@ -428,16 +474,13 @@ impl<W: Write> SplStreamWriter<W> {
         band_height_lines: u16,
         raw_bitmap: &[u8],
     ) -> io::Result<()> {
-        // Sıkıştırmayı dene
-        let (compression_type, payload_bytes) = if let Some(comp) = Algo0x11::compress(raw_bitmap) {
-            if comp.len() < raw_bitmap.len() {
-                (SplCompression::Rle, comp)
-            } else {
-                (SplCompression::None, raw_bitmap.to_vec())
-            }
-        } else {
-            (SplCompression::None, raw_bitmap.to_vec())
-        };
+        // Gerçek SpliX (compress.cpp compressPage/_compressBandedPage) hiçbir zaman
+        // ham/sıkıştırmasız (0x00) bant göndermez: yalnızca 0x0D/0x0E/0x11/0x13/0x15
+        // algoritmalarından biri kullanılır. Bu yazıcı ailesinde ham bant firmware
+        // tarafından tanınmıyor ("INTERNAL ERROR - Please use the proper driver"
+        // ile reddediliyor); bu yüzden burada da her zaman Algo 0x11 RLE kullanılır.
+        let payload_bytes = Algo0x11::compress(raw_bitmap).unwrap_or_default();
+        let compression_type = SplCompression::Rle;
 
         // Toplam veri boyutu: payload + 4 (sub-header sig) + 4 (checksum)
         let total_data_size = (payload_bytes.len() + 8) as u32;
@@ -450,7 +493,7 @@ impl<W: Write> SplStreamWriter<W> {
         band_header[0x3] = (band_width_pixels & 0xFF) as u8;
         band_header[0x4] = (band_height_lines >> 8) as u8;
         band_header[0x5] = (band_height_lines & 0xFF) as u8;
-        band_header[0x6] = compression_type as u8; // 0x11 veya 0x00
+        band_header[0x6] = compression_type as u8; // 0x11 (Algo 0x11 RLE)
         band_header[0x7] = (total_data_size >> 24) as u8;
         band_header[0x8] = (total_data_size >> 16) as u8;
         band_header[0x9] = (total_data_size >> 8) as u8;
@@ -461,7 +504,7 @@ impl<W: Write> SplStreamWriter<W> {
         // 2. Alt Başlık İmzası (Sub-header: 0x09ABCDEF LE)
         self.writer.write_all(&SUBHEADER_SIG_LE)?;
 
-        // 3. Sıkıştırılmış / Ham Şerit Verisi
+        // 3. Sıkıştırılmış (Algo 0x11 RLE) Şerit Verisi
         self.writer.write_all(&payload_bytes)?;
 
         // 4. Sağlama Toplamı (Checksum: Subheader + Payload toplamı)
@@ -488,9 +531,11 @@ impl<W: Write> SplStreamWriter<W> {
     }
 
     /// İş Sonu (PJL UEL Kapanışı)
+    ///
+    /// Gerçek SpliX (printer.cpp sendPJLFooter) `_endPJL`'i olduğu gibi yazıp
+    /// hemen flush eder; sona fazladan bir "\n" EKLEMEZ.
     pub fn end_job(&mut self) -> io::Result<()> {
         self.writer.write_all(PJL_END)?;
-        self.writer.write_all(b"\n")?;
         self.writer.flush()?;
         Ok(())
     }
@@ -508,5 +553,104 @@ mod tests {
         }
         let comp = Algo0x11::compress(&sample).unwrap();
         assert!(comp.len() < sample.len());
+    }
+
+    #[test]
+    fn test_algo0x11_roundtrip_synthetic() {
+        // Rastgele olmayan ama tekrarlı+değişken içerik: metin benzeri veri.
+        let mut sample = vec![0u8; 620 * 128];
+        for (i, b) in sample.iter_mut().enumerate() {
+            *b = ((i * 37 + (i / 620) * 13) % 251) as u8;
+        }
+        for i in 0..sample.len() {
+            if (i / 620) % 5 == 0 && (i % 620) > 50 && (i % 620) < 400 {
+                sample[i] = 0xFF;
+            }
+        }
+        let comp = Algo0x11::compress(&sample).unwrap();
+        let decomp = Algo0x11::decompress(&comp);
+        assert_eq!(decomp.len(), sample.len(), "decompressed length mismatch");
+        assert_eq!(decomp, sample, "decompressed content mismatch");
+    }
+
+    #[test]
+    fn test_algo0x11_roundtrip_real_band0() {
+        use crate::raster::CupsRasterReader;
+        use std::fs::File;
+        use std::io::{BufReader, Read};
+
+        let path = "target/test_output/test.raster";
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => {
+                eprintln!("SKIP: {} yok, test atlandı", path);
+                return;
+            }
+        };
+        let mut reader = CupsRasterReader::new(BufReader::new(file)).unwrap();
+        let header = reader.next_page_header().unwrap().unwrap();
+
+        let page_width_pixels =
+            (((header.page_size_points[0] as f64 * header.hw_resolution[0] as f64 / 72.0).ceil())
+                as u32
+                + 7)
+                & !7u32;
+        let band_width_bytes = ((page_width_pixels + 7) / 8) as usize;
+        let cups_line_bytes = header.bytes_per_line as usize;
+        let margin_bytes = (band_width_bytes - cups_line_bytes) / 2;
+        let bytes_to_copy = cups_line_bytes.min(band_width_bytes - margin_bytes);
+        let band_height = 128usize;
+
+        let stream = reader.stream_mut();
+        let mut line_buffer = vec![0u8; cups_line_bytes];
+        let mut band_data = vec![0u8; band_width_bytes * band_height];
+        let mut found_band = None;
+
+        // Sayfanın en üstü genelde boş kenar boşluğudur; gerçek (tekdüze
+        // olmayan) içerik barındıran ilk bandı bulana kadar ilerle.
+        for band_idx in 0..(header.height as usize / band_height + 1) {
+            for b in band_data.iter_mut() {
+                *b = 0;
+            }
+            let mut lines_read = 0;
+            for y in 0..band_height {
+                if stream.read_exact(&mut line_buffer).is_err() {
+                    break;
+                }
+                lines_read += 1;
+                let dst = y * band_width_bytes + margin_bytes;
+                band_data[dst..dst + bytes_to_copy].copy_from_slice(&line_buffer[..bytes_to_copy]);
+            }
+            if lines_read == 0 {
+                break;
+            }
+            let mut inverted = band_data.clone();
+            for b in &mut inverted {
+                *b = !*b;
+            }
+            if inverted.iter().any(|&b| b != inverted[0]) {
+                found_band = Some((band_idx, inverted));
+                break;
+            }
+        }
+
+        let (band_idx, band_data) = found_band.expect("sayfada tekdüze olmayan bant bulunamadı");
+        eprintln!("Test icin secilen band: {}", band_idx);
+
+        let comp = Algo0x11::compress(&band_data).unwrap();
+        let decomp = Algo0x11::decompress(&comp);
+        assert_eq!(
+            decomp.len(),
+            band_data.len(),
+            "decompressed length mismatch: {} != {}",
+            decomp.len(),
+            band_data.len()
+        );
+        let first_diff = decomp.iter().zip(band_data.iter()).position(|(a, b)| a != b);
+        assert_eq!(
+            first_diff, None,
+            "decompressed content differs from original at byte offset {:?}",
+            first_diff
+        );
     }
 }

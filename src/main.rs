@@ -279,12 +279,16 @@ fn stream_page_bands<R: Read, W: Write>(
         for y in 0..lines_in_this_band {
             stream.read_exact(&mut line_buffer)?;
 
-            // SpliX document.cpp'deki kopyalama:
-            //   memcpy(planes[i] + index + marginWidthInB, line + clippingX, bytesToCopy)
-            // CUPS verisini margin ile ortalayarak bant tamponuna kopyala
-            let dst_offset = y * bw_bytes + margin_bytes;
-            band_data[dst_offset..dst_offset + bytes_to_copy]
-                .copy_from_slice(&line_buffer[..bytes_to_copy]);
+            // SpliX algo0x11.h: Algo0x11::reverseLineColumn() == true, yani
+            // compress.cpp'deki _compressBandedPage bant tamponunu SÜTUN-ÖNCELİKLİ
+            // (transpoze) doldurur: band[x * bandHeight + y] = kaynak[x + margin].
+            // Satır-öncelikli (row-major) doldurma, sıkıştırma kendisi doğru
+            // çalışsa bile yazıcının transpoze edilmiş/gürültülü bir görüntü
+            // çözmesine yol açar.
+            for c in 0..bytes_to_copy {
+                let col = margin_bytes + c;
+                band_data[col * band_height + y] = line_buffer[c];
+            }
         }
 
         // Samsung ML-2160 serisi QPDL lazer motoru, CUPS K renk uzayının TERSİ polariteyle çalışır:
