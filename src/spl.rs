@@ -5,7 +5,7 @@
 //! ve sağlama toplamlı (checksum) Algo 0x11 RLE şerit kodlaması.
 //!
 //! Kaynak: OpenPrinting SpliX (QPDL v3 / ML-2160 serisi)
-//! Lisans: GPLv2 / GPLv3 Uyumlu
+//! Lisans: GPLv2 (yalnızca v2 — SpliX kaynağıyla aynı)
 
 use std::io::{self, Write};
 
