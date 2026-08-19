@@ -1,0 +1,12 @@
+[package]
+name = "samsung-2165-rust"
+version = "0.1.0"
+edition = "2021"
+authors = ["CUPS Raster Filter Developer"]
+description = "CUPS/PWG Raster Filter for Linux printing architecture"
+
+[dependencies]
+
+[[bin]]
+name = "rastertospl-rust"
+path = "src/main.rs"
