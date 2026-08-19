@@ -1,42 +1,42 @@
 # samsung-ml2160-rust
 
-Samsung ML-2160 serisi monokrom lazer yazıcılar için Rust ile yazılmış bir CUPS raster filtresi (`rastertospl-rust`). CUPS'un ürettiği standart raster akışını (`RaSt`/`RaS2`/`RaS3`), yazıcının anladığı ikili **SPL2 / QPDL v3** formatına dönüştürür: PJL iş zarfı, 17 baytlık sayfa başlığı, Algo 0x11 RLE ile sıkıştırılmış şerit (band) kayıtları ve sağlama toplamları.
+A CUPS raster filter (`rastertospl-rust`) for Samsung ML-2160 series monochrome laser printers, written in Rust. It converts CUPS's standard raster stream (`RaSt`/`RaS2`/`RaS3`) into the printer's native binary **SPL2 / QPDL v3** format: PJL job envelope, 17-byte page header, Algo 0x11 RLE-compressed band records, and checksums.
 
-Protokol detayları [OpenPrinting SpliX](https://github.com/OpenPrinting/splix) sürücüsünün gerçek kaynak koduyla (`document.cpp`, `compress.cpp`, `qpdl.cpp`, `algo0x11.cpp`, `printer.cpp`) karşılaştırılarak doğrulanmış ve gerçek donanımda test edilmiştir.
+The protocol implementation was verified against the actual source of the [OpenPrinting SpliX](https://github.com/OpenPrinting/splix) driver (`document.cpp`, `compress.cpp`, `qpdl.cpp`, `algo0x11.cpp`, `printer.cpp`) and tested on real hardware.
 
-## Desteklenen Modeller
+## Supported Models
 
-ML-2160, ML-2165, ML-2165W, ML-2168 (aynı QPDL v3 protokol ailesi).
+ML-2160, ML-2165, ML-2165W, ML-2168 (same QPDL v3 protocol family).
 
-## Gereksinimler
+## Requirements
 
 - Rust toolchain (`cargo`)
 - CUPS (`lpadmin`, `lpinfo`, `cupstestppd`)
-- Yazıcı USB ile bağlı ve açık
+- Printer connected via USB and powered on
 
-## Kurulum
+## Installation
 
 ```sh
-./install.sh [kuyruk-adı] [device-uri]
+./install.sh [queue-name] [device-uri]
 ```
 
-Betik sırasıyla: projeyi derler (`cargo build --release`), PPD dosyasını doğrular (`cupstestppd`), filtre ikilisini `/usr/lib/cups/filter/`'a kurar ve bağlı Samsung ML-2160 serisi USB yazıcıyı otomatik bulup bir CUPS kuyruğu (varsayılan adı `ML2160_Rust`) olarak tanımlar. Yalnızca sistem dosyalarına yazan adımlarda `sudo` parolası ister; betiğin tamamını `sudo` ile çalıştırmayın.
+The script builds the project (`cargo build --release`), validates the PPD file (`cupstestppd`), installs the filter binary into `/usr/lib/cups/filter/`, and auto-detects a connected Samsung ML-2160 series USB printer to register as a CUPS queue (default name `ML2160_Rust`). It only asks for a `sudo` password on the steps that write to system files — don't run the whole script with `sudo`.
 
-USB dışında bir bağlantı (örn. ağ yazıcısı) kullanıyorsanız aygıt URI'sini elle verin:
+If you're using a non-USB connection (e.g. a network printer), pass the device URI manually:
 
 ```sh
 ./install.sh MyPrinter "ipp://192.168.1.50/ipp/print"
 ```
 
-Kurulumdan sonra test baskısı:
+Send a test print after installing:
 
 ```sh
-lp -d ML2160_Rust dosya.pdf
+lp -d ML2160_Rust file.pdf
 ```
 
-### Manuel Kurulum
+### Manual Installation
 
-`install.sh` kullanmak istemezseniz aynı adımları elle çalıştırabilirsiniz:
+If you'd rather not use `install.sh`, run the same steps by hand:
 
 ```sh
 cargo build --release
@@ -44,30 +44,30 @@ sudo install -m 755 -o root -g root target/release/rastertospl-rust /usr/lib/cup
 sudo lpadmin -p ML2160_Rust -E -v <device-uri> -P ppd/samsung-ml2160.ppd
 ```
 
-## Test
+## Testing
 
-`test_pipeline.sh`, örnek bir PDF'i (Ghostscript ile üretir), `cupsfilter` ile CUPS raster akışına çevirir, filtreden geçirir ve üretilen SPL2 dosyasının PJL/QPDL kayıt yapısını (sayfa başlığı, band kayıtları, checksum'lar, iş sonu) ayrıştırıp doğrular:
+`test_pipeline.sh` generates a sample PDF (via Ghostscript), converts it to a CUPS raster stream with `cupsfilter`, runs it through the filter, and parses/validates the resulting SPL2 file's PJL/QPDL record structure (page header, band records, checksums, job end):
 
 ```sh
-./test_pipeline.sh                 # örnek PDF otomatik üretilir
-./test_pipeline.sh benim.pdf       # kendi PDF'inizle
+./test_pipeline.sh                 # auto-generates a sample PDF
+./test_pipeline.sh mine.pdf        # or use your own PDF
 ```
 
-Birim testleri (Algo 0x11 RLE round-trip testi dahil):
+Unit tests (including an Algo 0x11 RLE round-trip test):
 
 ```sh
 cargo test
 ```
 
-## Proje Yapısı
+## Project Structure
 
-- `src/main.rs` — CUPS filtre giriş noktası: argüman ayrıştırma, sayfa/band döngüsü
-- `src/raster.rs` — CUPS Raster (V1/V2/V3) başlık ayrıştırıcı
-- `src/spl.rs` — SPL2/QPDL protokolü: PJL zarfı, sayfa/band kayıtları, Algo 0x11 RLE
-- `ppd/samsung-ml2160.ppd` — CUPS PPD dosyası
-- `install.sh` — derleme + sistem kurulumu
-- `test_pipeline.sh` — uçtan uca pipeline testi ve SPL2 format doğrulayıcı
+- `src/main.rs` — CUPS filter entry point: argument parsing, page/band loop
+- `src/raster.rs` — CUPS Raster (V1/V2/V3) header parser
+- `src/spl.rs` — SPL2/QPDL protocol: PJL envelope, page/band records, Algo 0x11 RLE
+- `ppd/samsung-ml2160.ppd` — CUPS PPD file
+- `install.sh` — build + system installation
+- `test_pipeline.sh` — end-to-end pipeline test and SPL2 format validator
 
-## Lisans
+## License
 
-GPLv2 (yalnızca v2) — bkz. [LICENSE](LICENSE). Protokol uygulaması GPLv2 lisanslı OpenPrinting SpliX projesinden türetildiği için bu lisansla uyumludur.
+GPLv2 (v2 only) — see [LICENSE](LICENSE). The protocol implementation is derived from the GPLv2-licensed OpenPrinting SpliX project, so it's licensed to match.

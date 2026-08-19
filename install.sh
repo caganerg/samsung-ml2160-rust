@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Samsung ML-2160 Serisi Rust CUPS Filtresi - Kurulum Betiği
+# Samsung ML-2160 Series Rust CUPS Filter - Install Script
 #
-# 1. Filtreyi derler (cargo build --release)
-# 2. PPD dosyasını doğrular (cupstestppd)
-# 3. Filtre ikilisini /usr/lib/cups/filter/ altına kurar (root gerekir)
-# 4. Bağlı Samsung ML-2160 serisi USB yazıcıyı otomatik bulup CUPS kuyruğu
-#    olarak tanımlar (root gerekir)
+# 1. Builds the filter (cargo build --release)
+# 2. Validates the PPD file (cupstestppd)
+# 3. Installs the filter binary into /usr/lib/cups/filter/ (requires root)
+# 4. Auto-detects a connected Samsung ML-2160 series USB printer and
+#    registers it as a CUPS queue (requires root)
 #
-# Kullanım:
-#   ./install.sh [kuyruk-adi] [device-uri]
+# Usage:
+#   ./install.sh [queue-name] [device-uri]
 #
-#   kuyruk-adi   : Oluşturulacak/güncellenecek CUPS kuyruğunun adı
-#                  (varsayılan: ML2160_Rust)
-#   device-uri   : Yazıcının CUPS aygıt URI'si (varsayılan: `lpinfo -v`
-#                  çıktısından otomatik tespit edilir; USB dışı bağlantılar
-#                  için elle verin, örn. bir ağ yazıcısının ipp:// adresi)
+#   queue-name  : Name of the CUPS queue to create/update
+#                 (default: ML2160_Rust)
+#   device-uri  : The printer's CUPS device URI (default: auto-detected
+#                 from `lpinfo -v` output; provide manually for non-USB
+#                 connections, e.g. a network printer's ipp:// address)
 #
-# Not: Betik kendisi root olarak ÇALIŞTIRILMAMALIDIR (derleme adımı normal
-# kullanıcı olarak yapılır); yalnızca sistem dosyalarına yazan iki adım için
-# gerektiğinde `sudo` ile parola sorulur.
+# Note: Do NOT run this script itself as root (the build step runs as the
+# normal user); it only asks for `sudo` internally for the two steps that
+# write to system paths.
 # ==============================================================================
 set -euo pipefail
 
@@ -41,73 +41,73 @@ FILTER_DEST="/usr/lib/cups/filter/rastertospl-rust"
 PPD_SRC="$SCRIPT_DIR/ppd/samsung-ml2160.ppd"
 
 echo -e "${BOLD}${BLUE}======================================================${NC}"
-echo -e "${BOLD}${BLUE} Samsung ML-2160 Rust CUPS Filtresi - Kurulum ${NC}"
+echo -e "${BOLD}${BLUE} Samsung ML-2160 Rust CUPS Filter - Install ${NC}"
 echo -e "${BOLD}${BLUE}======================================================${NC}"
 
 if [[ $EUID -eq 0 ]]; then
-    echo -e "${RED}HATA: Bu betiği doğrudan root olarak çalıştırmayın (sudo ./install.sh değil).${NC}"
-    echo -e "${RED}Betik, derlemeyi normal kullanıcı olarak yapar ve yalnızca sistem${NC}"
-    echo -e "${RED}dosyalarına yazarken kendi içinden sudo ister.${NC}"
+    echo -e "${RED}ERROR: Do not run this script directly as root (not 'sudo ./install.sh').${NC}"
+    echo -e "${RED}It builds the project as the normal user and only invokes sudo${NC}"
+    echo -e "${RED}internally when writing to system files.${NC}"
     exit 1
 fi
 
-# 1. Gerekli araçların kontrolü
-echo -e "\n${YELLOW}[1/5] Gerekli araçlar kontrol ediliyor...${NC}"
+# 1. Check required tools
+echo -e "\n${YELLOW}[1/5] Checking required tools...${NC}"
 for cmd in cargo lpadmin lpinfo cupstestppd; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo -e "${RED}HATA: '$cmd' bulunamadı. Rust toolchain ve CUPS kurulu olmalı.${NC}"
+        echo -e "${RED}ERROR: '$cmd' not found. A Rust toolchain and CUPS must be installed.${NC}"
         exit 1
     fi
 done
-echo -e "${GREEN} -> cargo, lpadmin, lpinfo, cupstestppd mevcut.${NC}"
+echo -e "${GREEN} -> cargo, lpadmin, lpinfo, cupstestppd are present.${NC}"
 
 if ! systemctl is-active --quiet cups 2>/dev/null; then
-    echo -e "${YELLOW} UYARI: CUPS servisi çalışmıyor gibi görünüyor (systemctl is-active cups).${NC}"
+    echo -e "${YELLOW} WARNING: The CUPS service does not appear to be running (systemctl is-active cups).${NC}"
 fi
 
-# 2. Derleme
-echo -e "\n${YELLOW}[2/5] Filtre derleniyor (cargo build --release)...${NC}"
+# 2. Build
+echo -e "\n${YELLOW}[2/5] Building the filter (cargo build --release)...${NC}"
 cargo build --release
 if [ ! -f "$FILTER_BIN" ]; then
-    echo -e "${RED}HATA: $FILTER_BIN bulunamadı! Derleme başarısız.${NC}"
+    echo -e "${RED}ERROR: $FILTER_BIN not found! Build failed.${NC}"
     exit 1
 fi
-echo -e "${GREEN} -> Filtre ikili dosyası hazır: $FILTER_BIN${NC}"
+echo -e "${GREEN} -> Filter binary ready: $FILTER_BIN${NC}"
 
-# 3. PPD doğrulama
-echo -e "\n${YELLOW}[3/5] PPD dosyası doğrulanıyor (cupstestppd)...${NC}"
+# 3. Validate PPD
+echo -e "\n${YELLOW}[3/5] Validating the PPD file (cupstestppd)...${NC}"
 if ! cupstestppd "$PPD_SRC"; then
-    echo -e "${RED}HATA: PPD dosyası doğrulamadan geçemedi: $PPD_SRC${NC}"
+    echo -e "${RED}ERROR: PPD file failed validation: $PPD_SRC${NC}"
     exit 1
 fi
-echo -e "${GREEN} -> PPD geçerli: $PPD_SRC${NC}"
+echo -e "${GREEN} -> PPD is valid: $PPD_SRC${NC}"
 
-# 4. Filtreyi sisteme kur (root gerekir)
-echo -e "\n${YELLOW}[4/5] Filtre ikilisi kuruluyor: $FILTER_DEST (sudo gerekebilir)${NC}"
+# 4. Install the filter system-wide (requires root)
+echo -e "\n${YELLOW}[4/5] Installing filter binary: $FILTER_DEST (sudo may be required)${NC}"
 sudo install -m 755 -o root -g root "$SCRIPT_DIR/$FILTER_BIN" "$FILTER_DEST"
-echo -e "${GREEN} -> Filtre kuruldu: $FILTER_DEST${NC}"
+echo -e "${GREEN} -> Filter installed: $FILTER_DEST${NC}"
 
-# 5. Yazıcı kuyruğunu oluştur/güncelle (root gerekir)
-echo -e "\n${YELLOW}[5/5] Yazıcı kuyruğu ayarlanıyor: $PRINTER_NAME${NC}"
+# 5. Create/update the printer queue (requires root)
+echo -e "\n${YELLOW}[5/5] Setting up printer queue: $PRINTER_NAME${NC}"
 
 if [[ -z "$DEVICE_URI" ]]; then
-    echo -e "${BLUE} -> Aygıt URI'si verilmedi, bağlı Samsung ML-2160 serisi USB yazıcı aranıyor...${NC}"
+    echo -e "${BLUE} -> No device URI given, searching for a connected Samsung ML-2160 series USB printer...${NC}"
     DEVICE_URI="$(lpinfo -v 2>/dev/null | awk '/direct usb:\/\/Samsung\/ML-216/ {print $2; exit}')"
 fi
 
 if [[ -z "$DEVICE_URI" ]]; then
-    echo -e "${RED}HATA: Samsung ML-2160 serisi bağlı bir USB yazıcı otomatik bulunamadı.${NC}"
-    echo -e "${RED}Yazıcının USB ile bağlı ve açık olduğundan emin olun, ya da aygıt URI'sini${NC}"
-    echo -e "${RED}elle belirtin:${NC}"
+    echo -e "${RED}ERROR: Could not auto-detect a connected Samsung ML-2160 series USB printer.${NC}"
+    echo -e "${RED}Make sure the printer is connected via USB and powered on, or specify the${NC}"
+    echo -e "${RED}device URI manually:${NC}"
     echo -e "${RED}  $0 $PRINTER_NAME <device-uri>${NC}"
-    echo -e "${RED}Mevcut aygıtları görmek için: lpinfo -v${NC}"
+    echo -e "${RED}To list available devices: lpinfo -v${NC}"
     exit 1
 fi
-echo -e "${GREEN} -> Aygıt bulundu: $DEVICE_URI${NC}"
+echo -e "${GREEN} -> Device found: $DEVICE_URI${NC}"
 
 sudo lpadmin -p "$PRINTER_NAME" -E -v "$DEVICE_URI" -P "$PPD_SRC"
-echo -e "${GREEN} -> Kuyruk hazır: $PRINTER_NAME${NC}"
+echo -e "${GREEN} -> Queue ready: $PRINTER_NAME${NC}"
 
-echo -e "\n${BOLD}${GREEN}Kurulum tamamlandı.${NC}"
+echo -e "\n${BOLD}${GREEN}Installation complete.${NC}"
 lpstat -p "$PRINTER_NAME" 2>/dev/null || true
-echo -e "\nTest baskısı için: ${BOLD}lp -d $PRINTER_NAME <dosya.pdf>${NC}"
+echo -e "\nTo send a test print: ${BOLD}lp -d $PRINTER_NAME <file.pdf>${NC}"
