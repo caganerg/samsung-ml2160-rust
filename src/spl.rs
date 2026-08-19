@@ -1,6 +1,6 @@
 //! # Samsung Printer Language (SPL2 / QPDL v3) Protokol Modülü
 //!
-//! Samsung ML-2165 ve uyumlu monokrom QPDL/SPL2 lazer yazıcılar için
+//! Samsung ML-2160 serisi ve uyumlu monokrom QPDL/SPL2 lazer yazıcılar için
 //! tam uyumlu PJL iş kontrolü, 17-baytlık sayfa başlığı, 0x09ABCDEF alt-başlıklı
 //! ve sağlama toplamlı (checksum) Algo 0x11 RLE şerit kodlaması.
 //!
@@ -366,7 +366,7 @@ impl<W: Write> SplStreamWriter<W> {
         }
     }
 
-    /// Samsung ML-2165 PJL Başlığını gönderir.
+    /// Samsung ML-2160 serisi PJL Başlığını gönderir.
     pub fn begin_job(&mut self, config: &JobConfig) -> io::Result<()> {
         let mut pjl = Vec::with_capacity(256);
         pjl.extend_from_slice(PJL_UEL);

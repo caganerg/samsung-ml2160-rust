@@ -1,5 +1,5 @@
 [package]
-name = "samsung-2165-rust"
+name = "samsung-2160-rust"
 version = "0.1.0"
 edition = "2021"
 authors = ["CUPS Raster Filter Developer"]

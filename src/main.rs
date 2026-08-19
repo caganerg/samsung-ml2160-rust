@@ -138,7 +138,7 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
 
     let mut spl_writer = SplStreamWriter::new(io::stdout());
 
-    // 2. Samsung ML-2165 PJL Başlığı (@PJL ENTER LANGUAGE = QPDL)
+    // 2. Samsung ML-2160 serisi PJL Başlığı (@PJL ENTER LANGUAGE = QPDL)
     let job_config = JobConfig {
         job_name: args.title.clone().unwrap_or_else(|| "CUPS Document".to_string()),
         user_name: args.user.clone().unwrap_or_else(|| "guest".to_string()),
@@ -168,7 +168,7 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
         // SpliX compress.cpp (M2026 öncesi orijinal mantık):
         //   bandWidthInB = lineWidthInB = (pageWidth + 7) / 8
         //   bandWidth = bandWidthInB * 8
-        // ML-2165 için 256-hizalama kullanılmıyor.
+        // ML-2160 serisi için 256-hizalama kullanılmıyor.
         let band_width_bytes = (page_width_pixels + 7) / 8;
         let band_width_pixels = band_width_bytes * 8;
 
@@ -287,7 +287,7 @@ fn stream_page_bands<R: Read, W: Write>(
                 .copy_from_slice(&line_buffer[..bytes_to_copy]);
         }
 
-        // Samsung ML-2165 QPDL lazer motoru, CUPS K renk uzayının TERSİ polariteyle çalışır:
+        // Samsung ML-2160 serisi QPDL lazer motoru, CUPS K renk uzayının TERSİ polariteyle çalışır:
         //   CUPS K:     0 = beyaz (toner yok),  1 = siyah (toner var)
         //   Samsung:    0 = siyah (toner bas),   1 = beyaz (toner yok)
         // Empirik test: tersleme olmadan sayfa simsiyah çıkıyor.

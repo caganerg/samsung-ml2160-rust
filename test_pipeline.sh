@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Samsung ML-2165 CUPS Raster -> SPL2 Pipeline & Header Doğrulama Test Betiği
+# Samsung ML-2160 CUPS Raster -> SPL2 Pipeline & Header Doğrulama Test Betiği
 # ==============================================================================
 set -euo pipefail
 
@@ -15,7 +15,7 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-PPD_FILE="ppd/samsung-ml2165.ppd"
+PPD_FILE="ppd/samsung-ml2160.ppd"
 TARGET_BIN="target/release/rastertospl-rust"
 TEMP_DIR="target/test_output"
 mkdir -p "$TEMP_DIR"
@@ -25,7 +25,7 @@ RASTER_FILE="$TEMP_DIR/test.raster"
 SPL_OUTPUT="$TEMP_DIR/output.spl"
 
 echo -e "${BOLD}${BLUE}======================================================${NC}"
-echo -e "${BOLD}${BLUE} Samsung ML-2165 SPL2 Filtre Doğrulama Testi ${NC}"
+echo -e "${BOLD}${BLUE} Samsung ML-2160 SPL2 Filtre Doğrulama Testi ${NC}"
 echo -e "${BOLD}${BLUE}======================================================${NC}"
 
 # 1. Girdi PDF Kontrolü (Yoksa Ghostscript ile otomatik örnek PDF üret)
@@ -34,7 +34,7 @@ if [ ! -f "$PDF_INPUT" ]; then
     gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH \
        -sOutputFile="$PDF_INPUT" -c "
         /Helvetica-Bold findfont 24 scalefont setfont
-        50 750 moveto (Samsung ML-2165 Rust CUPS Driver Test) show
+        50 750 moveto (Samsung ML-2160 Rust CUPS Driver Test) show
         /Helvetica findfont 12 scalefont setfont
         50 710 moveto (Bu belge, Rust ile yazilan rastertospl filtresi icin otomatik uretilmistir.) show
         50 690 moveto (Hedef Format: Samsung Printer Language 2 (SPL2 / QPDL)) show
@@ -57,7 +57,7 @@ fi
 echo -e "${GREEN} -> Filtre ikili dosyası hazır: $TARGET_BIN${NC}"
 
 # 3. cupsfilter ile PDF'i CUPS Raster'a Çevir
-echo -e "\n${YELLOW}[3/5] cupsfilter ile Samsung ML-2165 CUPS Raster akışı üretiliyor...${NC}"
+echo -e "\n${YELLOW}[3/5] cupsfilter ile Samsung ML-2160 CUPS Raster akışı üretiliyor...${NC}"
 cupsfilter -p "$PPD_FILE" -m application/vnd.cups-raster "$PDF_INPUT" > "$RASTER_FILE" 2>/dev/null || \
 cupsfilter -p "$PPD_FILE" "$PDF_INPUT" > "$RASTER_FILE" 2>/dev/null
 
@@ -102,64 +102,111 @@ if "@PJL ENTER LANGUAGE = SPL2" not in pjl_text and "@PJL ENTER LANGUAGE = QPDL"
 else:
     print(" [OK] 2. PJL Değişkenleri ve SPL2 Emülasyon Modu Doğrulandı.")
 
-# 3. İkili (Binary) SPL Belge Başlık Kaydı (0x1B, 0x7B, 0x00 ...)
-idx_doc = data.find(b"\x1b\x7b\x00")
-if idx_doc == -1:
-    errors.append("SPL İkili Belge Başlangıç Kaydı (ESC { 0x00) bulunamadı!")
+# Gerçek biçim (src/spl.rs): PJL metin bloğundan sonra ham ikili QPDL kayıtları
+# gelir; ESC { (0x1B 0x7B) önekli bir çerçeveleme YOKTUR. Kayıt düzeni:
+#   [17 bayt sayfa başlığı] [0..N band kaydı] [3 bayt sayfa sonu] ... [PJL UEL kapanışı]
+SUBHEADER_SIG = bytes([0xEF, 0xCD, 0xAB, 0x09])
+PJL_END = b"\t\x1b%-12345X"
+
+# 3. PJL bloğunun bittiği, ikili QPDL verisinin başladığı ofseti bul
+qpdl_marker = b"ENTER LANGUAGE = QPDL\n"
+idx = data.find(qpdl_marker)
+if idx == -1:
+    errors.append("'@PJL ENTER LANGUAGE = QPDL' satırı bulunamadı, ikili blok başlangıcı tespit edilemiyor!")
+    cursor = len(data)
 else:
-    print(f" [OK] 3. SPL Doc Init Kaydı Doğrulandı (Ofset: {idx_doc}).")
+    cursor = idx + len(qpdl_marker)
+    print(f" [OK] 3. PJL Bloğu Sonu / QPDL İkili Blok Başlangıcı Tespit Edildi (Ofset: {cursor}).")
 
-# 4. Sayfa Başlığı Kaydı (0x1B, 0x7B, 0x01 ...)
-idx_page = data.find(b"\x1b\x7b\x01")
-if idx_page == -1:
-    errors.append("SPL Sayfa Başlığı Kaydı (ESC { 0x01) bulunamadı!")
-else:
-    payload_len = int.from_bytes(data[idx_page+3:idx_page+7], "big")
-    paper_size = data[idx_page+7]
-    res_id = data[idx_page+10]
-    width_px = int.from_bytes(data[idx_page+15:idx_page+19], "big")
-    height_px = int.from_bytes(data[idx_page+19:idx_page+23], "big")
-
-    print(f" [OK] 4. SPL Sayfa Başlığı Doğrulandı (Ofset: {idx_page}):")
-    print(f"       - Payload Boyutu : {payload_len} bayt")
-    print(f"       - Kağıt Kodu     : 0x{paper_size:02X} (0x02 = A4)")
-    print(f"       - Çözünürlük ID  : 0x{res_id:02X} (0x01 = 600 DPI)")
-    print(f"       - Boyutlar       : {width_px} x {height_px} px")
-
-# 5. Şerit Kayıtları (Record 0x0C) Kontrolü
+# 4-6. Sayfa başlıkları, şerit (band) kayıtları ve sayfa sonlarını sırayla ayrıştır
+page_count = 0
 band_count = 0
 rle_count = 0
 raw_count = 0
-cursor = idx_page + 31
-while cursor < len(data) - 16:
-    if data[cursor] == 0x0C:
-        band_count += 1
-        comp = data[cursor + 7]
-        payload = int.from_bytes(data[cursor+8:cursor+12], "big")
-        if comp == 0x11:
-            rle_count += 1
-        elif comp == 0x00:
-            raw_count += 1
-        cursor += 12 + payload
-    elif data[cursor:cursor+3] == b"\x1b\x7b\x02": # Page End
+checksum_errors = 0
+
+while cursor < len(data) and data[cursor : cursor + len(PJL_END)] != PJL_END:
+    if data[cursor] != 0x00:
+        errors.append(f"Beklenmeyen bayt @ {cursor}: sayfa başlığı imzası (0x00) bekleniyor, 0x{data[cursor]:02X} bulundu!")
         break
+
+    if cursor + 17 > len(data):
+        errors.append("Sayfa başlığı için yetersiz veri!")
+        break
+
+    page_count += 1
+    page_hdr = data[cursor : cursor + 17]
+    res_id = page_hdr[0x1]
+    copies = int.from_bytes(page_hdr[0x2:0x4], "big")
+    paper_size = page_hdr[0x4]
+    width_px = int.from_bytes(page_hdr[0x5:0x7], "big")
+    height_px = int.from_bytes(page_hdr[0x7:0x9], "big")
+    qpdl_version = page_hdr[0xE]
+
+    print(f" [OK] 4. Sayfa {page_count} Başlığı Doğrulandı (Ofset: {cursor}):")
+    print(f"       - Kopya Sayısı   : {copies}")
+    print(f"       - Kağıt Kodu     : 0x{paper_size:02X} (0x02 = A4)")
+    print(f"       - Çözünürlük ID  : 0x{res_id:02X} (600/100 = 6)")
+    print(f"       - Boyutlar       : {width_px} x {height_px} px")
+    print(f"       - QPDL Sürümü    : {qpdl_version}")
+
+    cursor += 17
+
+    page_band_count = 0
+    while cursor < len(data) and data[cursor] == 0x0C:
+        if cursor + 11 > len(data):
+            errors.append("Band başlığı için yetersiz veri!")
+            break
+
+        band_hdr = data[cursor : cursor + 11]
+        band_id = band_hdr[0x1]
+        comp_type = band_hdr[0x6]
+        total_data_size = int.from_bytes(band_hdr[0x7:0xB], "big")
+        payload_len = total_data_size - 8
+
+        rec_start = cursor + 11
+        sig = data[rec_start : rec_start + 4]
+        payload = data[rec_start + 4 : rec_start + 4 + payload_len]
+        checksum_bytes = data[rec_start + 4 + payload_len : rec_start + 4 + payload_len + 4]
+
+        if sig != SUBHEADER_SIG:
+            errors.append(f"Band {band_id} (sayfa {page_count}): alt-başlık imzası hatalı @ {rec_start} (beklenen {SUBHEADER_SIG.hex()}, bulunan {sig.hex()})!")
+
+        calc_checksum = (sum(sig) + sum(payload)) & 0xFFFFFFFF
+        actual_checksum = int.from_bytes(checksum_bytes, "big")
+        if calc_checksum != actual_checksum:
+            checksum_errors += 1
+            errors.append(f"Band {band_id} (sayfa {page_count}): checksum uyuşmuyor (beklenen {calc_checksum}, bulunan {actual_checksum})!")
+
+        if comp_type == 0x11:
+            rle_count += 1
+        elif comp_type == 0x00:
+            raw_count += 1
+
+        page_band_count += 1
+        band_count += 1
+        cursor = rec_start + 4 + payload_len + 4
+
+    print(f" [OK] 5. Sayfa {page_count}: {page_band_count} band kaydı doğrulandı.")
+
+    # Sayfa Sonu (3 baytlık QPDL Page Footer: [0x01, copies_msb, copies_lsb])
+    if data[cursor : cursor + 1] == b"\x01" and cursor + 3 <= len(data):
+        footer_copies = int.from_bytes(data[cursor + 1 : cursor + 3], "big")
+        print(f" [OK] 6. Sayfa {page_count} Sonu (Form Feed) Doğrulandı, kopya={footer_copies}.")
+        cursor += 3
     else:
-        cursor += 1
+        errors.append(f"Sayfa {page_count} Sonu (0x01 Form Feed) bulunamadı @ {cursor}!")
+        break
 
-print(f" [OK] 5. SPL Şerit (Band) Kayıtları Doğrulandı:")
-print(f"       - Toplam Şerit Sayısı   : {band_count}")
-print(f"       - Algo 0x11 RLE Şeritleri: {rle_count}")
-print(f"       - Ham (Raw) Şeritler    : {raw_count}")
+if page_count == 0 and not errors:
+    errors.append("Hiçbir sayfa başlığı bulunamadı!")
 
-# 6. Sayfa Sonu (Form Feed 0x1B 0x7B 0x02) Kontrolü
-if b"\x1b\x7b\x02\x00\x00\x00\x00" not in data:
-    errors.append("SPL Sayfa Sonu / Form Feed (ESC { 0x02) bulunamadı!")
-else:
-    print(" [OK] 6. SPL Form Feed (Page End) Kaydı Doğrulandı.")
+if checksum_errors == 0 and page_count > 0:
+    print(f" [OK] Tüm band checksum'ları doğrulandı ({band_count} band, {rle_count} RLE, {raw_count} ham).")
 
 # 7. İş Sonu ve UEL Kapanış Kontrolü
-if not data.endswith(b"\x1b%-12345X"):
-    errors.append("SPL İş Sonu UEL (\x1b%-12345X) kapanışı bulunamadı!")
+if not data.rstrip(b"\n").endswith(PJL_END):
+    errors.append("SPL İş Sonu UEL (\\t\\x1b%-12345X) kapanışı bulunamadı!")
 else:
     print(" [OK] 7. SPL Job End ve UEL Kapanışı Doğrulandı.")
 
@@ -169,7 +216,7 @@ if errors:
         print(f"  - {e}")
     sys.exit(1)
 else:
-    print("\n\033[1;32m[BAŞARILI] SPL çıktısı Samsung ML-2165 protokol standartlarına %100 uygundur!\033[0m")
+    print("\n\033[1;32m[BAŞARILI] SPL çıktısı Samsung ML-2160 protokol standartlarına %100 uygundur!\033[0m")
 EOF
 
 echo -e "\n${BOLD}${GREEN}Pipeline testi başarıyla tamamlandı.${NC}"

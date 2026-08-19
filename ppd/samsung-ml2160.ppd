@@ -1,16 +1,16 @@
 *PPD-Adobe: "4.3"
-*%%%% PPD file for Samsung ML-2165 with rastertospl-rust
+*%%%% PPD file for Samsung ML-2160 Series with rastertospl-rust
 *%%%% Generated for Linux CUPS Printing Architecture
 *FormatVersion: "4.3"
 *FileVersion: "1.0"
 *LanguageVersion: English
 *LanguageEncoding: ISOLatin1
-*PCFileName: "ML2165.PPD"
+*PCFileName: "ML2160.PPD"
 *Manufacturer: "Samsung"
-*Product: "(ML-2165)"
-*ModelName: "Samsung ML-2165 Series"
-*ShortNickName: "Samsung ML-2165 (Rust)"
-*NickName: "Samsung ML-2165 Series, Rust SPL2 Driver"
+*Product: "(ML-2160 Series)"
+*ModelName: "Samsung ML-2160 Series"
+*ShortNickName: "Samsung ML-2160 (Rust)"
+*NickName: "Samsung ML-2160 Series, Rust SPL2 Driver"
 *PSVersion: "(3010.000) 550"
 *LanguageLevel: "3"
 *ColorDevice: False
@@ -30,7 +30,7 @@
 
 *% ============================================================================
 *% Resolution Options
-*% Not: Samsung ML-2165 motoru 600x600 DPI yerel (hardware native) çözünürlüğe
+*% Not: Samsung ML-2160 serisi motoru 600x600 DPI yerel (hardware native) çözünürlüğe
 *% sahiptir. 1200 DPI pazarlama değeri motor interpolasyonudur.
 *% ============================================================================
 *OpenUI *Resolution/Resolution: PickOne
@@ -140,4 +140,4 @@
 *QPDL BandSize: "64"
 *General DocHeaderValues: "<0><0><1>"
 
-*% End of ML2165.PPD
+*% End of ML2160.PPD
