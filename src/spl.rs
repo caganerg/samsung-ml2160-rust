@@ -422,7 +422,23 @@ impl<W: Write> SplStreamWriter<W> {
         pjl.extend_from_slice(b"@PJL DEFAULT POWERSAVE=ON\n");
         pjl.extend_from_slice(b"@PJL DEFAULT POWERSAVETIME=5\n");
         pjl.extend_from_slice(b"@PJL SET JAMRECOVERY=OFF\n");
-        pjl.extend_from_slice(b"@PJL SET DUPLEX=OFF\n");
+
+        // Gerçek SpliX (printer.cpp sendPJLHeader) duplex durumuna göre
+        // DUPLEX=ON/OFF ve (açıksa) BINDING=LONGEDGE/SHORTEDGE gönderir.
+        match config.duplex {
+            SplDuplex::Simplex => {
+                pjl.extend_from_slice(b"@PJL SET DUPLEX=OFF\n");
+            }
+            SplDuplex::LongEdge => {
+                pjl.extend_from_slice(b"@PJL SET DUPLEX=ON\n");
+                pjl.extend_from_slice(b"@PJL SET BINDING=LONGEDGE\n");
+            }
+            SplDuplex::ShortEdge => {
+                pjl.extend_from_slice(b"@PJL SET DUPLEX=ON\n");
+                pjl.extend_from_slice(b"@PJL SET BINDING=SHORTEDGE\n");
+            }
+        }
+
         pjl.extend_from_slice(b"@PJL SET PAPERTYPE=OFF\n");
         pjl.extend_from_slice(b"@PJL SET ALTITUDE=LOW\n");
         pjl.extend_from_slice(b"@PJL SET DENSITY=3\n");

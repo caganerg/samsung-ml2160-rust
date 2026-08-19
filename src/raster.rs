@@ -460,20 +460,45 @@ impl<R: Read> CupsRasterReader<R> {
         self.page_count
     }
 
-    /// Sonraki sayfa başlığını okur. Akış sonuna ulaşıldığında `Ok(None)` döner.
+    /// Sonraki sayfa başlığını okur. Akış, sayfalar arasında temiz bir şekilde
+    /// (0 bayt okunarak) sona ererse `Ok(None)` döner.
+    ///
+    /// `read_exact` tek başına, akışın başlık ortasında kesildiği (bozuk/yarım
+    /// veri) durumu ile iki sayfa arasındaki normal akış sonunu AYIRT EDEMEZ;
+    /// ikisi de aynı `UnexpectedEof` hatasını üretir. Bu, gerçek bir bozulmayı
+    /// sessizce "işi normal bitir" olarak yorumlamamak için baytları elle,
+    /// sayarak okur.
     pub fn next_page_header(&mut self) -> io::Result<Option<PageHeader>> {
         let header_len = self.version.header_size();
         let mut buf = vec![0u8; header_len];
 
-        match self.reader.read_exact(&mut buf) {
-            Ok(()) => {
-                self.page_count += 1;
-                let header = PageHeader::parse(&buf, self.version)?;
-                Ok(Some(header))
+        let mut total_read = 0usize;
+        while total_read < header_len {
+            match self.reader.read(&mut buf[total_read..]) {
+                Ok(0) => break,
+                Ok(n) => total_read += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
             }
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(e),
         }
+
+        if total_read == 0 {
+            return Ok(None);
+        }
+        if total_read < header_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "CUPS Raster akışı sayfa başlığının ortasında kesildi \
+                     ({} / {} bayt okundu). Önceki filtre aşaması yarıda kesilmiş olabilir.",
+                    total_read, header_len
+                ),
+            ));
+        }
+
+        self.page_count += 1;
+        let header = PageHeader::parse(&buf, self.version)?;
+        Ok(Some(header))
     }
 
     /// Sayfa raster verisini okumak için temel akışa erişim.

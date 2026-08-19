@@ -91,21 +91,52 @@ fn main() {
     }
 }
 
-/// SpliX compress.cpp'deki `bufferWidth` hesaplamasının Rust karşılığı.
+/// Sayfa başlığı alanlarının makul sınırlar içinde olduğunu doğrular.
 ///
-/// SpliX kaynak kodu:
-///   bufferWidth = page->width() & ~255;
-///   if ((bufferWidth + 128) < page->width())
-///       bufferWidth += 256;
-///
-/// Bu, 256-piksel hizalamalı (nearest-256 yuvarlama) bir genişlik üretir.
-/// Samsung QPDL DMA motoru bu hizalamayı bekler.
-fn compute_qpdl_buffer_width(page_width_pixels: u32) -> u32 {
-    let mut bw = page_width_pixels & !255u32;
-    if (bw + 128) < page_width_pixels {
-        bw += 256;
+/// Bozuk ya da kötü niyetli bir CUPS Raster akışı aşırı büyük `bytesPerLine`,
+/// yükseklik veya çözünürlük değerleri bildirebilir; bu değerler doğrudan
+/// tampon boyutu hesaplarında kullanıldığından, doğrulanmadan geçirilmeleri
+/// devasa/aşırı bellek tahsisine (OOM) ya da sessizce taşan hesaplamalara yol
+/// açabilir. Bu sınırlar gerçekçi yazıcı donanımının çok üzerinde, sadece
+/// açıkça saçma değerleri elemek için var.
+fn validate_page_header(header: &PageHeader) -> io::Result<()> {
+    const MAX_BYTES_PER_LINE: u32 = 1_000_000;
+    const MAX_LINES: u32 = 1_000_000;
+    const MAX_DPI: u32 = 10_000;
+    const MAX_POINTS: u32 = 100_000;
+
+    let invalid = |msg: String| Err(io::Error::new(io::ErrorKind::InvalidData, msg));
+
+    if header.bytes_per_line == 0 || header.bytes_per_line > MAX_BYTES_PER_LINE {
+        return invalid(format!(
+            "Geçersiz cupsBytesPerLine değeri: {}",
+            header.bytes_per_line
+        ));
     }
-    bw
+    if header.height == 0 || header.height > MAX_LINES {
+        return invalid(format!(
+            "Geçersiz sayfa yüksekliği (satır sayısı): {}",
+            header.height
+        ));
+    }
+    if header.hw_resolution[0] == 0
+        || header.hw_resolution[0] > MAX_DPI
+        || header.hw_resolution[1] == 0
+        || header.hw_resolution[1] > MAX_DPI
+    {
+        return invalid(format!("Geçersiz çözünürlük: {:?}", header.hw_resolution));
+    }
+    if header.page_size_points[0] == 0
+        || header.page_size_points[0] > MAX_POINTS
+        || header.page_size_points[1] == 0
+        || header.page_size_points[1] > MAX_POINTS
+    {
+        return invalid(format!(
+            "Geçersiz sayfa boyutu (pt): {:?}",
+            header.page_size_points
+        ));
+    }
+    Ok(())
 }
 
 /// SpliX document.cpp'deki `pageWidth` hesaplamasının Rust karşılığı.
@@ -138,19 +169,32 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
 
     let mut spl_writer = SplStreamWriter::new(io::stdout());
 
+    // İlk sayfa başlığını, işi başlatmadan (begin_job) önce oku: CUPS Raster
+    // duplex bilgisini SAYFA başlığında taşır, ama PJL iş başlığı duplex'i
+    // İŞ seviyesinde bildirmek zorunda. Bu yüzden ilk başlığı "peek" edip iş
+    // yapılandırmasını buna göre kuruyoruz; döngüde tekrar okumuyoruz.
+    let mut next_header = raster_reader.next_page_header()?;
+
+    let job_duplex = match &next_header {
+        Some(h) if h.duplex => SplDuplex::LongEdge,
+        _ => SplDuplex::Simplex,
+    };
+
     // 2. Samsung ML-2160 serisi PJL Başlığı (@PJL ENTER LANGUAGE = QPDL)
     let job_config = JobConfig {
         job_name: args.title.clone().unwrap_or_else(|| "CUPS Document".to_string()),
         user_name: args.user.clone().unwrap_or_else(|| "guest".to_string()),
         service_date: "20120101".to_string(),
-        duplex: SplDuplex::Simplex,
+        duplex: job_duplex,
     };
     spl_writer.begin_job(&job_config)?;
 
     let mut page_number = 0;
 
     // 3. Sayfa Döngüsü
-    while let Some(header) = raster_reader.next_page_header()? {
+    while let Some(header) = next_header.take() {
+        validate_page_header(&header)?;
+
         page_number += 1;
 
         eprintln!("PAGE: {} {}", page_number, header.num_copies.max(1));
@@ -172,11 +216,33 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
         let band_width_bytes = (page_width_pixels + 7) / 8;
         let band_width_pixels = band_width_bytes * 8;
 
+        // QPDL bant kaydındaki genişlik/yükseklik alanları 16-bit'tir (spl.rs
+        // write_compressed_band). Bu sınırı aşan bir değeri sessizce `as u16`
+        // ile kırpmak, yazıcıya bildirilen genişlik ile gerçek payload'ın
+        // uyuşmamasına (DMA/RLE çözme senkron kaybı) yol açar; bunun yerine
+        // erken ve net bir hata döndürüyoruz.
+        if band_width_pixels > u16::MAX as u32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Bant genişliği QPDL'nin 16-bit alanına sığmıyor: {} px",
+                    band_width_pixels
+                ),
+            ));
+        }
+
         // CUPS raster verisi (596B) ile bant genişliği (620B) farkı = margin
         let cups_line_bytes = header.bytes_per_line as usize;
         let margin_bytes = if (band_width_bytes as usize) > cups_line_bytes {
             ((band_width_bytes as usize) - cups_line_bytes) / 2
         } else {
+            if (band_width_bytes as usize) < cups_line_bytes {
+                eprintln!(
+                    "WARNING: Hesaplanan bant genişliği ({} B) CUPS satır genişliğinden ({} B) dar; \
+                     satırların sağ kenarı kırpılacak.",
+                    band_width_bytes, cups_line_bytes
+                );
+            }
             0
         };
 
@@ -221,6 +287,8 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
         spl_writer.end_page(header.num_copies.max(1) as u16)?;
 
         eprintln!("INFO: Sayfa {} tamamlandı.\n", page_number);
+
+        next_header = raster_reader.next_page_header()?;
     }
 
     if page_number == 0 {
