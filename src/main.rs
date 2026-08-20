@@ -59,15 +59,37 @@ impl CupsFilterArgs {
 }
 
 fn main() {
+    // CUPS filtreleri normalde `filter job-id user title copies options [file]`
+    // (5-6 argüman) ile çağrılır. Programın hiç argümansız (yalnızca ikili
+    // dosya adıyla) çalıştırılması gerçek bir `cupsd` çağrısı değildir — ya
+    // yanlış kurulumdur ya da elle/keşif amaçlı bir çalıştırmadır. Bu araca
+    // en yakın mimari eşdeğerler olan `/usr/lib/cups/filter/rastertopwg` ve
+    // `pstops` çalıştırılarak doğrulandı: ikisi de bu durumda bir
+    // "Usage: ..." mesajı basıp 1 koduyla çıkıyor; CUPS *backend*'lerine
+    // özgü olan "desteklenen MIME türlerini listeleyip 0 ile çık" davranışını
+    // UYGULAMIYORLAR (o davranış filtreler için değil, aygıt keşfi yapan
+    // backend'ler içindir). Bu yüzden burada da aynı yaklaşım izleniyor: boş
+    // stdin okumayı denemeden önce net bir kullanım mesajıyla erken çıkılıyor.
+    if env::args().count() <= 1 {
+        let prog = env::args()
+            .next()
+            .unwrap_or_else(|| "rastertospl-rust".to_string());
+        eprintln!("Usage: {} job-id user title copies options [file]", prog);
+        process::exit(1);
+    }
+
     let args = CupsFilterArgs::parse();
 
-    // `user` ve `title`, işi gönderen istemciden (CUPS üzerinden) geldiği için
-    // güvenilmez kabul edilmeli: `{}` yerine `{:?}` (Debug) kullanmak, gömülü
-    // ANSI/terminal kaçış dizilerini ve kontrol karakterlerini (ör. ESC, CR)
-    // `\u{1b}` gibi kaçırılmış (escaped) biçimde yazdırarak sahte log satırı
-    // enjeksiyonunu ya da terminal emülatörü zafiyetlerinin tetiklenmesini önler.
+    // `user`, `title` ve `job_id`, işi gönderen istemciden (CUPS üzerinden)
+    // geldiği için güvenilmez kabul edilmeli: `{}` yerine `{:?}` (Debug)
+    // kullanmak, gömülü ANSI/terminal kaçış dizilerini ve kontrol
+    // karakterlerini (ör. ESC, CR) `\u{1b}` gibi kaçırılmış (escaped)
+    // biçimde yazdırarak sahte log satırı enjeksiyonunu ya da terminal
+    // emülatörü zafiyetlerinin tetiklenmesini önler. Normal akışta `job_id`
+    // sayısal bir dize olsa da, filtre manipüle edilmiş argümanlarla elle
+    // çağrıldığında bu garanti yoktur.
     if let (Some(job), Some(user)) = (&args.job_id, &args.user) {
-        eprintln!("DEBUG: CUPS Job ID: {}, User: {:?}", job, user);
+        eprintln!("DEBUG: CUPS Job ID: {:?}, User: {:?}", job, user);
     }
     if let Some(title) = &args.title {
         eprintln!("DEBUG: CUPS Title: {:?}", title);
@@ -195,6 +217,19 @@ fn compute_page_width_pixels(page_size_pt: u32, x_dpi: u32) -> u32 {
     (px + 7) & !7u32
 }
 
+/// CUPS Raster başlığındaki `num_copies` (u32) alanını QPDL'nin 16-bit kopya
+/// sayısı alanına güvenle sığacak şekilde normalize eder.
+///
+/// Önceki `header.num_copies.max(1) as u16` ifadesi, 65536 (2^16) ve katları
+/// gibi değerlerde sessizce 0'a taşıyordu (`u16::MAX + 1 == 0`); bu da
+/// yazıcıya fiilen "0 kopya bas" komutu gönderilmesine yol açardı.
+/// `clamp(1, u16::MAX)` hem alt hem üst sınırı aynı anda garanti eder: 0
+/// asla geçmez, aşırı büyük değerler ise sessizce taşmak yerine 16-bit
+/// alanın sığdırabildiği en büyük değere sabitlenir.
+fn sanitize_copies(num_copies: u32) -> u16 {
+    num_copies.clamp(1, u16::MAX as u32) as u16
+}
+
 /// Standart CUPS Raster akışını okur ve Samsung QPDL/SPL2 formatına dönüştürür.
 fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> io::Result<()> {
     // 1. CUPS Raster başlık/magic kontrolü (RaSt, RaS2, RaS3 vb.)
@@ -306,7 +341,7 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
             } else {
                 SplDuplex::Simplex
             },
-            copies: header.num_copies.max(1) as u16,
+            copies: sanitize_copies(header.num_copies),
             // SpliX qpdl.cpp renderPage: width = page->width() = pageWidth
             width_pixels: band_width_pixels,
             height_pixels: header.height,
@@ -327,7 +362,7 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
         )?;
 
         // 3-Baytlık QPDL Sayfa Sonu
-        spl_writer.end_page(header.num_copies.max(1) as u16)?;
+        spl_writer.end_page(sanitize_copies(header.num_copies))?;
 
         eprintln!("INFO: Sayfa {} tamamlandı.\n", page_number);
 
@@ -464,6 +499,17 @@ fn print_header_info(page_num: u32, header: &PageHeader) {
 mod tests {
     use super::*;
     use raster::CupsRasterVersion;
+
+    #[test]
+    fn test_sanitize_copies_never_returns_zero() {
+        assert_eq!(sanitize_copies(0), 1);
+        assert_eq!(sanitize_copies(1), 1);
+        assert_eq!(sanitize_copies(5), 5);
+        // Eski davranış: `.max(1) as u16` burada 0 döndürüyordu.
+        assert_eq!(sanitize_copies(65536), u16::MAX);
+        assert_eq!(sanitize_copies(131072), u16::MAX);
+        assert_eq!(sanitize_copies(u32::MAX), u16::MAX);
+    }
 
     /// A4, 600 DPI, 1-bit monokrom (K), tutarlı `bytesPerLine`'a sahip
     /// geçerli bir başlık üretir; testler bunu temel alıp tek bir alanı
