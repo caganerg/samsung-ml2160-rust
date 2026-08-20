@@ -393,6 +393,21 @@ impl Algo0x11 {
 // SPL2 / QPDL Akış Yöneticisi (SplStreamWriter)
 // ============================================================================
 
+/// PJL akışına gömülecek serbest metin alanlarını (JOBNAME, USERNAME vb.) güvenli hale getirir.
+///
+/// PJL satır tabanlıdır ve alıntılanmış (`"..."`) dizeleri için bir kaçış
+/// (escape) mekanizması yoktur: gömülen bir CR/LF ya da ESC (Universal Exit
+/// Language'ın başlangıcı) baytı, alanı erken sonlandırıp ardından gelen
+/// metnin yazıcı tarafından tamamen yeni, keyfi bir PJL komutu/işi olarak
+/// yorumlanmasına yol açabilir. `job_name`/`user_name` CUPS iş başlığından
+/// (dolayısıyla işi gönderen istemciden) geldiği için güvenilmez kabul
+/// edilmeli. Kaçış mekanizması olmadığından, izin verilmeyen baytları
+/// (tüm kontrol karakterleri) ve alıntılanmış alanları bozmamak için çift
+/// tırnağı kaçırmak yerine tamamen kaldırıyoruz.
+fn sanitize_pjl_field(input: &str) -> String {
+    input.chars().filter(|c| !c.is_control() && *c != '"').collect()
+}
+
 pub struct SplStreamWriter<W: Write> {
     writer: W,
     current_band: u8,
@@ -415,10 +430,26 @@ impl<W: Write> SplStreamWriter<W> {
         let mut pjl = Vec::with_capacity(256);
         pjl.extend_from_slice(PJL_UEL);
         pjl.extend_from_slice(
-            format!("@PJL DEFAULT SERVICEDATE={}\n", config.service_date).as_bytes(),
+            format!(
+                "@PJL DEFAULT SERVICEDATE={}\n",
+                sanitize_pjl_field(&config.service_date)
+            )
+            .as_bytes(),
         );
-        pjl.extend_from_slice(format!("@PJL SET USERNAME=\"{}\"\n", config.user_name).as_bytes());
-        pjl.extend_from_slice(format!("@PJL SET JOBNAME=\"{}\"\n", config.job_name).as_bytes());
+        pjl.extend_from_slice(
+            format!(
+                "@PJL SET USERNAME=\"{}\"\n",
+                sanitize_pjl_field(&config.user_name)
+            )
+            .as_bytes(),
+        );
+        pjl.extend_from_slice(
+            format!(
+                "@PJL SET JOBNAME=\"{}\"\n",
+                sanitize_pjl_field(&config.job_name)
+            )
+            .as_bytes(),
+        );
         pjl.extend_from_slice(b"@PJL DEFAULT POWERSAVE=ON\n");
         pjl.extend_from_slice(b"@PJL DEFAULT POWERSAVETIME=5\n");
         pjl.extend_from_slice(b"@PJL SET JAMRECOVERY=OFF\n");
@@ -560,6 +591,67 @@ impl<W: Write> SplStreamWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_pjl_field_strips_injection_chars() {
+        assert_eq!(sanitize_pjl_field("Normal Title"), "Normal Title");
+        // Çift tırnak: alıntılanmış alanı erken kapatabilir.
+        assert_eq!(sanitize_pjl_field("a\"b"), "ab");
+        // CR/LF: yeni bir PJL komut satırı başlatabilir.
+        assert_eq!(sanitize_pjl_field("a\r\nb"), "ab");
+        // ESC: Universal Exit Language (@PJL zarfını erken bitirir).
+        assert_eq!(sanitize_pjl_field("a\x1bb"), "ab");
+        // Tam enjeksiyon denemesi: yeni bir @PJL komutu eklemeye çalışıyor.
+        let injected = sanitize_pjl_field("x\"\n@PJL DEFAULT PASSWORD=1234\n");
+        assert!(!injected.contains('"'));
+        assert!(!injected.contains('\n'));
+        assert!(!injected.contains('\r'));
+    }
+
+    #[test]
+    fn test_begin_job_blocks_pjl_line_injection() {
+        // Kötü niyetli girdi: tırnak + CR/LF ile alıntılanmış alandan kaçıp
+        // yeni bir "@PJL DEFAULT PASSWORD=..." satırı enjekte etmeye,
+        // ayrıca ESC (UEL) ile PJL zarfını erken bitirip yeni bir zarf/iş
+        // başlatmaya çalışıyor.
+        let malicious = JobConfig {
+            job_name: "Evil\"\n@PJL DEFAULT PASSWORD=1234".to_string(),
+            user_name: "attacker\x1b%-12345X@PJL SET JOBNAME=\"hijacked".to_string(),
+            service_date: "20120101".to_string(),
+            duplex: SplDuplex::Simplex,
+        };
+        let benign = JobConfig {
+            job_name: "Benign".to_string(),
+            user_name: "benign".to_string(),
+            service_date: "20120101".to_string(),
+            duplex: SplDuplex::Simplex,
+        };
+
+        let mut out_malicious: Vec<u8> = Vec::new();
+        SplStreamWriter::new(&mut out_malicious)
+            .begin_job(&malicious)
+            .unwrap();
+        let mut out_benign: Vec<u8> = Vec::new();
+        SplStreamWriter::new(&mut out_benign).begin_job(&benign).unwrap();
+
+        // Kötü niyetli girdi, zararsız girdiyle AYNI sayıda PJL satırı
+        // üretmeli: sanitizasyon başarısız olsaydı gömülü "\n" ekstra
+        // satır(lar) enjekte ederdi.
+        let lines_malicious = out_malicious.iter().filter(|&&b| b == b'\n').count();
+        let lines_benign = out_benign.iter().filter(|&&b| b == b'\n').count();
+        assert_eq!(
+            lines_malicious, lines_benign,
+            "girdi ekstra PJL komut satırı enjekte edebildi"
+        );
+
+        // Akışta, baştaki tek UEL dışında başka bir UEL (yeni bir PJL
+        // zarfı/iş başlangıcı) bulunmamalı.
+        let uel_count = out_malicious
+            .windows(PJL_UEL.len())
+            .filter(|w| *w == PJL_UEL)
+            .count();
+        assert_eq!(uel_count, 1, "girdi yeni bir UEL zarfı enjekte edebildi");
+    }
 
     #[test]
     fn test_algo0x11_compression() {
