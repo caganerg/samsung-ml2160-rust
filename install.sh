@@ -7,8 +7,9 @@
 # 3. Validates the PPD file (cupstestppd) — this must happen after the
 #    filter is in place, since cupstestppd checks that the file the PPD's
 #    cupsFilter/cupsFilter2 lines point to actually exists
-# 4. Auto-detects a connected Samsung ML-2160 series USB printer and
-#    registers it as a CUPS queue (requires root)
+# 4. Auto-detects a connected Samsung ML-2160 series printer (USB, or
+#    network/Wi-Fi models like ML-2165W if already discovered via
+#    mDNS/Bonjour/SNMP) and registers it as a CUPS queue (requires root)
 #
 # Usage:
 #   ./install.sh [queue-name] [device-uri]
@@ -17,11 +18,13 @@
 #                 auto-detected from the printer's model, e.g. ML2165W_Rust;
 #                 falls back to ML2160_Rust if the model can't be determined)
 #   device-uri  : The printer's CUPS device URI (default: auto-detected
-#                 from `lpinfo -v` output; provide manually for non-USB
-#                 connections, e.g. a network printer's ipp:// address)
+#                 from `lpinfo -v` output, USB or network; provide manually
+#                 if the printer isn't listed there, e.g. a network/Wi-Fi
+#                 printer's socket://<ip>:9100 JetDirect address)
 #
-# Both arguments are optional — with a single USB-connected Samsung
-# ML-2160-series printer plugged in, `./install.sh` alone is enough.
+# Both arguments are optional — with a single Samsung ML-2160-series
+# printer connected (via USB, or over the network and already visible in
+# `lpinfo -v`), `./install.sh` alone is enough.
 #
 # Note: Do NOT run this script itself as root (the build step runs as the
 # normal user); it only asks for `sudo` internally for the two steps that
@@ -98,20 +101,25 @@ echo -e "${GREEN} -> PPD is valid: $PPD_SRC${NC}"
 echo -e "\n${YELLOW}[5/5] Setting up printer queue...${NC}"
 
 if [[ -z "$DEVICE_URI" ]]; then
-    echo -e "${BLUE} -> No device URI given, searching for a connected Samsung ML-2160 series USB printer...${NC}"
-    mapfile -t FOUND_DEVICES < <(lpinfo -v 2>/dev/null | awk '/direct usb:\/\/Samsung\/ML-216/ {print $2}')
+    echo -e "${BLUE} -> No device URI given, searching for a connected Samsung ML-2160 series printer (USB or network)...${NC}"
+    # Matches both USB entries ("direct usb://Samsung/ML-2165W...") and
+    # network entries discovered via mDNS/Bonjour/SNMP ("network dnssd://
+    # Samsung%20ML-2165W%20Series..."), since ML-2165W and similar Wi-Fi
+    # models never show up under "direct usb://".
+    mapfile -t FOUND_DEVICES < <(lpinfo -v 2>/dev/null | grep -E 'Samsung.*ML-?216[0-9]W?' | awk '{print $2}')
     if [[ ${#FOUND_DEVICES[@]} -gt 1 ]]; then
-        echo -e "${YELLOW} WARNING: Multiple Samsung ML-216x USB printers found; using the first one:${NC}"
+        echo -e "${YELLOW} WARNING: Multiple Samsung ML-216x printers found; using the first one:${NC}"
         printf '   %s\n' "${FOUND_DEVICES[@]}"
     fi
     DEVICE_URI="${FOUND_DEVICES[0]:-}"
 fi
 
 if [[ -z "$DEVICE_URI" ]]; then
-    echo -e "${RED}ERROR: Could not auto-detect a connected Samsung ML-2160 series USB printer.${NC}"
-    echo -e "${RED}Make sure the printer is connected via USB and powered on, or specify the${NC}"
-    echo -e "${RED}device URI manually:${NC}"
-    echo -e "${RED}  $0 ${PRINTER_NAME_ARG:-ML2160_Rust} <device-uri>${NC}"
+    echo -e "${RED}ERROR: Could not auto-detect a connected Samsung ML-2160 series printer.${NC}"
+    echo -e "${RED}Make sure the printer is connected via USB and powered on, or, for a network/Wi-Fi${NC}"
+    echo -e "${RED}printer (e.g. ML-2165W) not found via mDNS/Bonjour, specify the device URI manually.${NC}"
+    echo -e "${RED}These printers accept raw print data on the JetDirect port, so the usual form is:${NC}"
+    echo -e "${RED}  $0 ${PRINTER_NAME_ARG:-ML2165W_Rust} socket://<printer-ip>:9100${NC}"
     echo -e "${RED}To list available devices: lpinfo -v${NC}"
     exit 1
 fi

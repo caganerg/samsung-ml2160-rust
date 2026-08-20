@@ -7,10 +7,15 @@
 *LanguageEncoding: ISOLatin1
 *PCFileName: "ML2160.PPD"
 *Manufacturer: "Samsung"
+*% Same QPDL v3 protocol family (USB or network/Wi-Fi); listed so manual
+*% and semi-automatic CUPS driver selection matches any of them.
 *Product: "(ML-2160 Series)"
-*ModelName: "Samsung ML-2160 Series"
-*ShortNickName: "Samsung ML-2160 (Rust)"
-*NickName: "Samsung ML-2160 Series, Rust SPL2 Driver"
+*Product: "(ML-2165 Series)"
+*Product: "(ML-2165W Series)"
+*Product: "(ML-2168 Series)"
+*ModelName: "Samsung ML-2160/2165/2165W/2168 Series"
+*ShortNickName: "Samsung ML-2160 Series (Rust)"
+*NickName: "Samsung ML-2160/2165/2165W/2168 Series, Rust SPL2 Driver"
 *PSVersion: "(3010.000) 550"
 *LanguageLevel: "3"
 *ColorDevice: False
@@ -19,6 +24,9 @@
 *Throughput: "20"
 *LandscapeOrientation: Plus90
 *TTRasterizer: Type42
+*% Real printers report their own model in MDL (e.g. "ML-2165W Series"), so
+*% this generic ID is only a fallback; install.sh assigns this PPD manually
+*% via `lpadmin -P`, so exact 1284DeviceID matching isn't required.
 *1284DeviceID: "MFG:Samsung;MDL:ML-2160 Series;CMD:SPL,FWV,EXT;"
 
 *% ============================================================================

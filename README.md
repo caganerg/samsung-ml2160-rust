@@ -22,7 +22,7 @@ ML-2160, ML-2165, ML-2165W, ML-2168 (same QPDL v3 protocol family).
 ./install.sh
 ```
 
-The script builds the project (`cargo build --release`), validates the PPD file (`cupstestppd`), installs the filter binary into `/usr/lib/cups/filter/`, and auto-detects a connected Samsung ML-2160 series USB printer to register as a CUPS queue. With a single USB-connected printer, no arguments are needed: the device URI is auto-detected from `lpinfo -v`, and the queue name is derived from the detected model (e.g. `ML2165W_Rust`), falling back to `ML2160_Rust` if the model can't be determined. It only asks for a `sudo` password on the steps that write to system files — don't run the whole script with `sudo`.
+The script builds the project (`cargo build --release`), validates the PPD file (`cupstestppd`), installs the filter binary into `/usr/lib/cups/filter/`, and auto-detects a connected Samsung ML-2160 series printer (USB, or a network/Wi-Fi model like ML-2165W already discovered via mDNS/Bonjour/SNMP) to register as a CUPS queue. With a single such printer visible in `lpinfo -v`, no arguments are needed: the device URI is auto-detected from there, and the queue name is derived from the detected model (e.g. `ML2165W_Rust`), falling back to `ML2160_Rust` if the model can't be determined. It only asks for a `sudo` password on the steps that write to system files — don't run the whole script with `sudo`.
 
 You can still override either value:
 
@@ -30,10 +30,10 @@ You can still override either value:
 ./install.sh [queue-name] [device-uri]
 ```
 
-If you're using a non-USB connection (e.g. a network printer), pass the device URI manually:
+If your printer isn't listed by `lpinfo -v` (e.g. a network/Wi-Fi model like ML-2165W not yet discovered), pass the device URI manually. These printers accept raw print data on the JetDirect port (9100), not IPP, so use `socket://`:
 
 ```sh
-./install.sh MyPrinter "ipp://192.168.1.50/ipp/print"
+./install.sh ML2165W_Rust "socket://192.168.1.50:9100"
 ```
 
 Send a test print after installing (using whatever queue name the script reported):
