@@ -54,6 +54,7 @@ echo -e "${GREEN} -> lpadmin, lpstat are present.${NC}"
 echo -e "\n${YELLOW}[2/3] Locating printer queue(s) to remove...${NC}"
 
 QUEUES=()
+AUTO_DETECTED=0
 if [[ -n "$QUEUE_ARG" ]]; then
     QUEUES=("$QUEUE_ARG")
     echo -e "${BLUE} -> Using queue name given on the command line: $QUEUE_ARG${NC}"
@@ -73,7 +74,22 @@ else
         echo -e "${RED}  $0 <queue-name>${NC}"
         exit 1
     fi
+    AUTO_DETECTED=1
     echo -e "${GREEN} -> Found queue(s): ${QUEUES[*]}${NC}"
+fi
+
+# Auto-detected queues are matched by a broad text pattern against `lpstat -v`
+# output, not an exact name; an unrelated queue whose device-info text happens
+# to contain a matching substring would otherwise be deleted silently. A queue
+# name given explicitly on the command line is operator-trusted and skips this.
+if [[ "$AUTO_DETECTED" -eq 1 ]]; then
+    echo -e "${BOLD}Remove the queue(s) listed above? [y/N]${NC}"
+    read -r -p "> " CONFIRM || CONFIRM=""
+    if [[ ! "$CONFIRM" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo -e "${RED}Aborted. Re-run with an explicit queue name if you know which one to remove:${NC}"
+        echo -e "${RED}  $0 <queue-name>${NC}"
+        exit 1
+    fi
 fi
 
 # 3. Remove the queue(s) and the filter binary (requires root)
