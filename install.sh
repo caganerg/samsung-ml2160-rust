@@ -139,7 +139,10 @@ echo -e "${GREEN} -> Device found: $DEVICE_URI${NC}"
 # skips this; an auto-detected one requires confirmation before use.
 if [[ "$AUTO_DETECTED" -eq 1 ]]; then
     if [[ "$DEVICE_KIND" == "direct" ]]; then
-        echo -e "${BLUE} -> Discovered via USB (direct physical connection).${NC}"
+        echo -e "${YELLOW} -> Discovered via USB (direct physical connection), which is unauthenticated.${NC}"
+        echo -e "${YELLOW}    A malicious USB device could advertise fake descriptor strings and${NC}"
+        echo -e "${YELLOW}    impersonate a Samsung printer, having your print jobs silently redirected${NC}"
+        echo -e "${YELLOW}    to it. Verify the address above.${NC}"
     else
         echo -e "${YELLOW} -> Discovered over the network (mDNS/Bonjour/SNMP), which is unauthenticated.${NC}"
         echo -e "${YELLOW}    A rogue device on the same network could impersonate a Samsung printer and${NC}"
