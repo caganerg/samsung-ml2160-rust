@@ -100,18 +100,23 @@ echo -e "${GREEN} -> PPD is valid: $PPD_SRC${NC}"
 # 5. Create/update the printer queue (requires root)
 echo -e "\n${YELLOW}[5/5] Setting up printer queue...${NC}"
 
+AUTO_DETECTED=0
 if [[ -z "$DEVICE_URI" ]]; then
     echo -e "${BLUE} -> No device URI given, searching for a connected Samsung ML-2160 series printer (USB or network)...${NC}"
     # Matches both USB entries ("direct usb://Samsung/ML-2165W...") and
     # network entries discovered via mDNS/Bonjour/SNMP ("network dnssd://
     # Samsung%20ML-2165W%20Series..."), since ML-2165W and similar Wi-Fi
-    # models never show up under "direct usb://".
-    mapfile -t FOUND_DEVICES < <(lpinfo -v 2>/dev/null | grep -E 'Samsung.*ML-?216[0-9]W?' | awk '{print $2}')
-    if [[ ${#FOUND_DEVICES[@]} -gt 1 ]]; then
+    # models never show up under "direct usb://". Full lines (not just the
+    # URI column) are kept so the discovery method ("direct" vs "network")
+    # can be reported below.
+    mapfile -t FOUND_LINES < <(lpinfo -v 2>/dev/null | grep -E 'Samsung.*ML-?216[0-9]W?')
+    if [[ ${#FOUND_LINES[@]} -gt 1 ]]; then
         echo -e "${YELLOW} WARNING: Multiple Samsung ML-216x printers found; using the first one:${NC}"
-        printf '   %s\n' "${FOUND_DEVICES[@]}"
+        printf '   %s\n' "${FOUND_LINES[@]}"
     fi
-    DEVICE_URI="${FOUND_DEVICES[0]:-}"
+    DEVICE_URI="$(awk '{print $2}' <<< "${FOUND_LINES[0]:-}")"
+    DEVICE_KIND="$(awk '{print $1}' <<< "${FOUND_LINES[0]:-}")"
+    AUTO_DETECTED=1
 fi
 
 if [[ -z "$DEVICE_URI" ]]; then
@@ -124,6 +129,30 @@ if [[ -z "$DEVICE_URI" ]]; then
     exit 1
 fi
 echo -e "${GREEN} -> Device found: $DEVICE_URI${NC}"
+
+# Device auto-discovery (mDNS/Bonjour/SNMP for network devices, and in principle
+# USB descriptor strings too) is unauthenticated: any device on the network —
+# or plugged into USB — can advertise itself as a "Samsung ML-216x" and get
+# silently wired up as the print destination, redirecting subsequently
+# printed documents to it (JetDirect is unencrypted, unauthenticated plaintext).
+# A device URI given explicitly on the command line is operator-trusted and
+# skips this; an auto-detected one requires confirmation before use.
+if [[ "$AUTO_DETECTED" -eq 1 ]]; then
+    if [[ "$DEVICE_KIND" == "direct" ]]; then
+        echo -e "${BLUE} -> Discovered via USB (direct physical connection).${NC}"
+    else
+        echo -e "${YELLOW} -> Discovered over the network (mDNS/Bonjour/SNMP), which is unauthenticated.${NC}"
+        echo -e "${YELLOW}    A rogue device on the same network could impersonate a Samsung printer and${NC}"
+        echo -e "${YELLOW}    have your print jobs silently redirected to it. Verify the address above.${NC}"
+    fi
+    echo -e "${BOLD}Set up the print queue using this device? [y/N]${NC}"
+    read -r -p "> " CONFIRM || CONFIRM=""
+    if [[ ! "$CONFIRM" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo -e "${RED}Aborted. Re-run with an explicit device URI if you know the correct address:${NC}"
+        echo -e "${RED}  $0 ${PRINTER_NAME_ARG:-ML2165W_Rust} socket://<printer-ip>:9100${NC}"
+        exit 1
+    fi
+fi
 
 if [[ -n "$PRINTER_NAME_ARG" ]]; then
     PRINTER_NAME="$PRINTER_NAME_ARG"
