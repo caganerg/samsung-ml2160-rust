@@ -3,8 +3,10 @@
 # Samsung ML-2160 Series Rust CUPS Filter - Install Script
 #
 # 1. Builds the filter (cargo build --release)
-# 2. Validates the PPD file (cupstestppd)
-# 3. Installs the filter binary into /usr/lib/cups/filter/ (requires root)
+# 2. Installs the filter binary into /usr/lib/cups/filter/ (requires root)
+# 3. Validates the PPD file (cupstestppd) — this must happen after the
+#    filter is in place, since cupstestppd checks that the file the PPD's
+#    cupsFilter/cupsFilter2 lines point to actually exists
 # 4. Auto-detects a connected Samsung ML-2160 series USB printer and
 #    registers it as a CUPS queue (requires root)
 #
@@ -78,18 +80,19 @@ if [ ! -f "$FILTER_BIN" ]; then
 fi
 echo -e "${GREEN} -> Filter binary ready: $FILTER_BIN${NC}"
 
-# 3. Validate PPD
-echo -e "\n${YELLOW}[3/5] Validating the PPD file (cupstestppd)...${NC}"
+# 3. Install the filter system-wide (requires root)
+echo -e "\n${YELLOW}[3/5] Installing filter binary: $FILTER_DEST (sudo may be required)${NC}"
+sudo install -m 755 -o root -g root "$SCRIPT_DIR/$FILTER_BIN" "$FILTER_DEST"
+echo -e "${GREEN} -> Filter installed: $FILTER_DEST${NC}"
+
+# 4. Validate PPD (must run after the filter is installed — cupstestppd
+# checks that the file referenced by cupsFilter/cupsFilter2 actually exists)
+echo -e "\n${YELLOW}[4/5] Validating the PPD file (cupstestppd)...${NC}"
 if ! cupstestppd "$PPD_SRC"; then
     echo -e "${RED}ERROR: PPD file failed validation: $PPD_SRC${NC}"
     exit 1
 fi
 echo -e "${GREEN} -> PPD is valid: $PPD_SRC${NC}"
-
-# 4. Install the filter system-wide (requires root)
-echo -e "\n${YELLOW}[4/5] Installing filter binary: $FILTER_DEST (sudo may be required)${NC}"
-sudo install -m 755 -o root -g root "$SCRIPT_DIR/$FILTER_BIN" "$FILTER_DEST"
-echo -e "${GREEN} -> Filter installed: $FILTER_DEST${NC}"
 
 # 5. Create/update the printer queue (requires root)
 echo -e "\n${YELLOW}[5/5] Setting up printer queue...${NC}"
