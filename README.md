@@ -22,7 +22,7 @@ ML-2160, ML-2165, ML-2165W, ML-2168 (same QPDL v3 protocol family).
 ./install.sh [queue-name] [device-uri]
 ```
 
-The script builds the project (`cargo build --release`), validates the PPD file (`cupstestppd`), installs the filter binary into `/usr/lib/cups/filter/`, and auto-detects a connected Samsung ML-2160 series USB printer to register as a CUPS queue (default name `ML2160_Rust`). It only asks for a `sudo` password on the steps that write to system files — don't run the whole script with `sudo`.
+The script builds the project (`cargo build --release`), validates the PPD file (`cupstestppd`), installs the filter binary into `/usr/lib/cups/filter/`, and auto-detects a connected Samsung ML-2160 series USB printer to register as a CUPS queue. Both `queue-name` and `device-uri` are optional: the device URI is auto-detected from `lpinfo -v`, and the queue name is derived from the detected model (e.g. `ML2165W_Rust`), falling back to `ML2160_Rust` if the model can't be determined. It only asks for a `sudo` password on the steps that write to system files — don't run the whole script with `sudo`.
 
 If you're using a non-USB connection (e.g. a network printer), pass the device URI manually:
 

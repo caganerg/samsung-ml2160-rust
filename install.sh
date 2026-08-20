@@ -11,11 +11,15 @@
 # Usage:
 #   ./install.sh [queue-name] [device-uri]
 #
-#   queue-name  : Name of the CUPS queue to create/update
-#                 (default: ML2160_Rust)
+#   queue-name  : Name of the CUPS queue to create/update (default:
+#                 auto-detected from the printer's model, e.g. ML2165W_Rust;
+#                 falls back to ML2160_Rust if the model can't be determined)
 #   device-uri  : The printer's CUPS device URI (default: auto-detected
 #                 from `lpinfo -v` output; provide manually for non-USB
 #                 connections, e.g. a network printer's ipp:// address)
+#
+# Both arguments are optional — with a single USB-connected Samsung
+# ML-2160-series printer plugged in, `./install.sh` alone is enough.
 #
 # Note: Do NOT run this script itself as root (the build step runs as the
 # normal user); it only asks for `sudo` internally for the two steps that
@@ -33,7 +37,7 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-PRINTER_NAME="${1:-ML2160_Rust}"
+PRINTER_NAME_ARG="${1:-}"
 DEVICE_URI="${2:-}"
 
 FILTER_BIN="target/release/rastertospl-rust"
@@ -88,22 +92,35 @@ sudo install -m 755 -o root -g root "$SCRIPT_DIR/$FILTER_BIN" "$FILTER_DEST"
 echo -e "${GREEN} -> Filter installed: $FILTER_DEST${NC}"
 
 # 5. Create/update the printer queue (requires root)
-echo -e "\n${YELLOW}[5/5] Setting up printer queue: $PRINTER_NAME${NC}"
+echo -e "\n${YELLOW}[5/5] Setting up printer queue...${NC}"
 
 if [[ -z "$DEVICE_URI" ]]; then
     echo -e "${BLUE} -> No device URI given, searching for a connected Samsung ML-2160 series USB printer...${NC}"
-    DEVICE_URI="$(lpinfo -v 2>/dev/null | awk '/direct usb:\/\/Samsung\/ML-216/ {print $2; exit}')"
+    mapfile -t FOUND_DEVICES < <(lpinfo -v 2>/dev/null | awk '/direct usb:\/\/Samsung\/ML-216/ {print $2}')
+    if [[ ${#FOUND_DEVICES[@]} -gt 1 ]]; then
+        echo -e "${YELLOW} WARNING: Multiple Samsung ML-216x USB printers found; using the first one:${NC}"
+        printf '   %s\n' "${FOUND_DEVICES[@]}"
+    fi
+    DEVICE_URI="${FOUND_DEVICES[0]:-}"
 fi
 
 if [[ -z "$DEVICE_URI" ]]; then
     echo -e "${RED}ERROR: Could not auto-detect a connected Samsung ML-2160 series USB printer.${NC}"
     echo -e "${RED}Make sure the printer is connected via USB and powered on, or specify the${NC}"
     echo -e "${RED}device URI manually:${NC}"
-    echo -e "${RED}  $0 $PRINTER_NAME <device-uri>${NC}"
+    echo -e "${RED}  $0 ${PRINTER_NAME_ARG:-ML2160_Rust} <device-uri>${NC}"
     echo -e "${RED}To list available devices: lpinfo -v${NC}"
     exit 1
 fi
 echo -e "${GREEN} -> Device found: $DEVICE_URI${NC}"
+
+if [[ -n "$PRINTER_NAME_ARG" ]]; then
+    PRINTER_NAME="$PRINTER_NAME_ARG"
+else
+    MODEL="$(grep -oE 'ML-?216[0-9]W?' <<< "$DEVICE_URI" | head -n1 | tr -d '-')"
+    PRINTER_NAME="${MODEL:-ML2160}_Rust"
+    echo -e "${BLUE} -> No queue name given, using auto-detected name: $PRINTER_NAME${NC}"
+fi
 
 sudo lpadmin -p "$PRINTER_NAME" -E -v "$DEVICE_URI" -P "$PPD_SRC"
 echo -e "${GREEN} -> Queue ready: $PRINTER_NAME${NC}"
