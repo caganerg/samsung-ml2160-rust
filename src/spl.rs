@@ -413,10 +413,39 @@ const MAX_PJL_FIELD_CHARS: usize = 128;
 /// (tüm kontrol karakterleri) ve alıntılanmış alanları bozmamak için çift
 /// tırnağı kaçırmak yerine tamamen kaldırıyoruz; ardından sonucu
 /// `MAX_PJL_FIELD_CHARS` ile sınırlıyoruz.
+/// `char::is_control()`'un kaçırdığı, ama yine de bir PJL alanına
+/// yerleştirilmesi güvensiz olan Unicode karakterleri denetler.
+///
+/// `is_control()` yalnızca ASCII/Latin-1 kontrol karakterlerini (Unicode
+/// "Cc" kategorisi: C0 0x00-0x1F ve C1 0x80-0x9F) yakalar. Aşağıdaki
+/// karakterler bu kategoride DEĞİLDİR ama aynı sınıf soruna yol açar:
+/// - U+2028/U+2029 (Satır/Paragraf Ayırıcı): bazı metin işleyicileri
+///   bunları CR/LF gibi bir satır sonu sayar.
+/// - U+202A-U+202E, U+2066-U+2069 (Bidi gömme/override/izolasyon, ör.
+///   RLO): görüntülenen metnin sırasını tersine çevirip bir job/kullanıcı
+///   adının loglarda veya yazıcı panelinde farklı (sahte) görünmesine yol
+///   açabilir — klasik dosya adı sahteciliği tekniğinin aynısı.
+/// - U+200B-U+200F, U+FEFF (sıfır genişlikli boşluk/birleştirici, BOM):
+///   görünmez baytlar ekleyip metni gizlice değiştirebilir.
+///
+/// Normal çok-baytlı UTF-8 karakterler (ör. Türkçe "ğ", "ı", "ş") kasıtlı
+/// olarak dokunulmadan bırakılıyor; yalnızca bu bilinen tehlikeli
+/// kategoriler engelleniyor.
+fn is_unsafe_pjl_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2028}' | '\u{2029}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{FEFF}'
+    )
+}
+
 fn sanitize_pjl_field(input: &str) -> String {
     input
         .chars()
-        .filter(|c| !c.is_control() && *c != '"')
+        .filter(|c| !c.is_control() && *c != '"' && !is_unsafe_pjl_char(*c))
         .take(MAX_PJL_FIELD_CHARS)
         .collect()
 }
@@ -619,6 +648,38 @@ mod tests {
         assert!(!injected.contains('"'));
         assert!(!injected.contains('\n'));
         assert!(!injected.contains('\r'));
+    }
+
+    #[test]
+    fn test_sanitize_pjl_field_strips_unicode_line_separators() {
+        // U+2028/U+2029: is_control() bunları yakalamaz, ama bazı metin
+        // işleyicileri satır sonu sayabilir.
+        assert_eq!(sanitize_pjl_field("a\u{2028}b"), "ab");
+        assert_eq!(sanitize_pjl_field("a\u{2029}b"), "ab");
+    }
+
+    #[test]
+    fn test_sanitize_pjl_field_strips_bidi_override_spoofing() {
+        // U+202E (RLO) ile "evil.exe" gibi bir dosya adı sahteciliği
+        // tekniğinin PJL alanlarında kullanıcı/iş adını farklı göstermesi
+        // engellenmeli.
+        let spoofed = sanitize_pjl_field("Invoice\u{202E}cod.exe");
+        assert!(!spoofed.contains('\u{202E}'));
+        assert_eq!(spoofed, "Invoicecod.exe");
+
+        // Diğer bidi gömme/izolasyon ve sıfır genişlikli karakterler de.
+        for c in ['\u{202A}', '\u{2066}', '\u{200B}', '\u{FEFF}'] {
+            let s = format!("a{}b", c);
+            assert_eq!(sanitize_pjl_field(&s), "ab", "char {:?} süzülmedi", c);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_pjl_field_preserves_legitimate_non_ascii() {
+        // Bloklama listesi yalnızca bilinen tehlikeli Unicode
+        // kategorilerini hedefler; Türkçe gibi meşru çok baytlı
+        // karakterler değiştirilmeden kalmalı.
+        assert_eq!(sanitize_pjl_field("Öğrenci Başvurusu"), "Öğrenci Başvurusu");
     }
 
     #[test]

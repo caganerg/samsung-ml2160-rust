@@ -24,8 +24,7 @@ struct CupsFilterArgs {
 }
 
 impl CupsFilterArgs {
-    fn parse() -> Self {
-        let args: Vec<String> = env::args().collect();
+    fn parse(args: &[String]) -> Self {
         if args.len() >= 6 {
             Self {
                 job_id: Some(args[1].clone()),
@@ -59,6 +58,17 @@ impl CupsFilterArgs {
 }
 
 fn main() {
+    // `env::args()` argv'de geçersiz UTF-8 baytı bulunca panic atar; ama bu
+    // argümanlar (`job-id user title copies options [file]`) `cupsd`
+    // tarafından işi gönderen istemcinin verdiği alanlardan (ör. job-name)
+    // türetiliyor ve güvenilmez kabul edilmeli. Bozuk/kötü niyetli bir başlık
+    // filtreyi daha ilk argümanı okurken çökertip DoS'a yol açmasın diye
+    // `env::args_os()` + kayıplı (lossy) UTF-8 dönüşümü kullanılıyor: geçersiz
+    // baytlar sessizce `U+FFFD` ile değiştirilir, panic olmaz.
+    let raw_args: Vec<String> = env::args_os()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+
     // CUPS filtreleri normalde `filter job-id user title copies options [file]`
     // (5-6 argüman) ile çağrılır. Programın hiç argümansız (yalnızca ikili
     // dosya adıyla) çalıştırılması gerçek bir `cupsd` çağrısı değildir — ya
@@ -70,15 +80,16 @@ fn main() {
     // UYGULAMIYORLAR (o davranış filtreler için değil, aygıt keşfi yapan
     // backend'ler içindir). Bu yüzden burada da aynı yaklaşım izleniyor: boş
     // stdin okumayı denemeden önce net bir kullanım mesajıyla erken çıkılıyor.
-    if env::args().count() <= 1 {
-        let prog = env::args()
-            .next()
+    if raw_args.len() <= 1 {
+        let prog = raw_args
+            .first()
+            .cloned()
             .unwrap_or_else(|| "rastertospl-rust".to_string());
         eprintln!("Usage: {} job-id user title copies options [file]", prog);
         process::exit(1);
     }
 
-    let args = CupsFilterArgs::parse();
+    let args = CupsFilterArgs::parse(&raw_args);
 
     // `user`, `title` ve `job_id`, işi gönderen istemciden (CUPS üzerinden)
     // geldiği için güvenilmez kabul edilmeli: `{}` yerine `{:?}` (Debug)
@@ -284,7 +295,13 @@ fn process_cups_raster_to_spl(args: &CupsFilterArgs, reader: Box<dyn Read>) -> i
 
         page_number += 1;
 
-        eprintln!("PAGE: {} {}", page_number, header.num_copies.max(1));
+        // `sanitize_copies` ile aynı değer loglanır: aksi halde bu satır,
+        // yazıcıya fiilen gönderilen (aşağıda begin_page/end_page ile
+        // sanitize_copies() üzerinden yazılan) kopya sayısından farklı,
+        // ham/sınırsız `header.num_copies` değerini gösterip yanıltıcı
+        // teşhis bilgisi üretebilirdi (ör. 65536 istenirse burada "65536"
+        // yazılır ama yazıcıya 999 gönderilirdi).
+        eprintln!("PAGE: {} {}", page_number, sanitize_copies(header.num_copies));
         eprintln!("INFO: Sayfa {} başlatılıyor...", page_number);
 
         print_header_info(page_number, &header);
