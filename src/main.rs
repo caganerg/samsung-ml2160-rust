@@ -217,17 +217,26 @@ fn compute_page_width_pixels(page_size_pt: u32, x_dpi: u32) -> u32 {
     (px + 7) & !7u32
 }
 
+/// Gerçekçi bir baskı işi için makul kabul edilen azami kopya sayısı.
+///
+/// QPDL'nin kopya alanı 16-bit'tir (teorik üst sınır 65535), ama hiçbir
+/// gerçek iş bu sınıra yakın bir değer istemez; 999, kağıt/toner israfına
+/// veya yazıcının fiziksel olarak saatlerce durmadan basmasına yol açacak
+/// bozuk/aşırı bir başlığa karşı ek bir güvenlik payı bırakır.
+const MAX_REALISTIC_COPIES: u16 = 999;
+
 /// CUPS Raster başlığındaki `num_copies` (u32) alanını QPDL'nin 16-bit kopya
 /// sayısı alanına güvenle sığacak şekilde normalize eder.
 ///
 /// Önceki `header.num_copies.max(1) as u16` ifadesi, 65536 (2^16) ve katları
 /// gibi değerlerde sessizce 0'a taşıyordu (`u16::MAX + 1 == 0`); bu da
 /// yazıcıya fiilen "0 kopya bas" komutu gönderilmesine yol açardı.
-/// `clamp(1, u16::MAX)` hem alt hem üst sınırı aynı anda garanti eder: 0
-/// asla geçmez, aşırı büyük değerler ise sessizce taşmak yerine 16-bit
-/// alanın sığdırabildiği en büyük değere sabitlenir.
+/// `clamp(1, MAX_REALISTIC_COPIES)` hem alt hem üst sınırı aynı anda
+/// garanti eder: 0 asla geçmez, aşırı büyük değerler ise sessizce taşmak
+/// yerine (16-bit alana teknik olarak sığsa bile) gerçekçi bir üst sınıra
+/// sabitlenir.
 fn sanitize_copies(num_copies: u32) -> u16 {
-    num_copies.clamp(1, u16::MAX as u32) as u16
+    num_copies.clamp(1, MAX_REALISTIC_COPIES as u32) as u16
 }
 
 /// Standart CUPS Raster akışını okur ve Samsung QPDL/SPL2 formatına dönüştürür.
@@ -505,10 +514,11 @@ mod tests {
         assert_eq!(sanitize_copies(0), 1);
         assert_eq!(sanitize_copies(1), 1);
         assert_eq!(sanitize_copies(5), 5);
+        assert_eq!(sanitize_copies(MAX_REALISTIC_COPIES as u32), MAX_REALISTIC_COPIES);
         // Eski davranış: `.max(1) as u16` burada 0 döndürüyordu.
-        assert_eq!(sanitize_copies(65536), u16::MAX);
-        assert_eq!(sanitize_copies(131072), u16::MAX);
-        assert_eq!(sanitize_copies(u32::MAX), u16::MAX);
+        assert_eq!(sanitize_copies(65536), MAX_REALISTIC_COPIES);
+        assert_eq!(sanitize_copies(131072), MAX_REALISTIC_COPIES);
+        assert_eq!(sanitize_copies(u32::MAX), MAX_REALISTIC_COPIES);
     }
 
     /// A4, 600 DPI, 1-bit monokrom (K), tutarlı `bytesPerLine`'a sahip
