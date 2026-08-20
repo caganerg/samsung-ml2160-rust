@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::process;
 
-use raster::{CupsRasterReader, PageHeader};
+use raster::{CupsColorSpace, CupsRasterReader, PageHeader};
 use spl::{
     JobConfig, PageConfig, SplDuplex, SplPaperSize, SplPaperSource, SplResolution, SplStreamWriter,
 };
@@ -61,11 +61,16 @@ impl CupsFilterArgs {
 fn main() {
     let args = CupsFilterArgs::parse();
 
+    // `user` ve `title`, işi gönderen istemciden (CUPS üzerinden) geldiği için
+    // güvenilmez kabul edilmeli: `{}` yerine `{:?}` (Debug) kullanmak, gömülü
+    // ANSI/terminal kaçış dizilerini ve kontrol karakterlerini (ör. ESC, CR)
+    // `\u{1b}` gibi kaçırılmış (escaped) biçimde yazdırarak sahte log satırı
+    // enjeksiyonunu ya da terminal emülatörü zafiyetlerinin tetiklenmesini önler.
     if let (Some(job), Some(user)) = (&args.job_id, &args.user) {
-        eprintln!("DEBUG: CUPS Job ID: {}, User: {}", job, user);
+        eprintln!("DEBUG: CUPS Job ID: {}, User: {:?}", job, user);
     }
     if let Some(title) = &args.title {
-        eprintln!("DEBUG: CUPS Title: {}", title);
+        eprintln!("DEBUG: CUPS Title: {:?}", title);
     }
 
     let input_reader: Box<dyn Read> = match &args.filename {
@@ -100,10 +105,18 @@ fn main() {
 /// açabilir. Bu sınırlar gerçekçi yazıcı donanımının çok üzerinde, sadece
 /// açıkça saçma değerleri elemek için var.
 fn validate_page_header(header: &PageHeader) -> io::Result<()> {
-    const MAX_BYTES_PER_LINE: u32 = 1_000_000;
-    const MAX_LINES: u32 = 1_000_000;
-    const MAX_DPI: u32 = 10_000;
-    const MAX_POINTS: u32 = 100_000;
+    // Sınırlar keyfi değil: ppd/samsung-ml2160.ppd'nin tanımladığı en yüksek
+    // çözünürlükten (1200 DPI) ve en büyük kağıttan (Legal, 612x1008 pt) türetildi,
+    // makul bir pay (yaklaşık %25) bırakıldı. Eski sınırlar (1.000.000 bayt/satır,
+    // 10.000 DPI, 100.000 pt) bu donanımın fiziksel olarak üretebileceğinin
+    // ~100 katı üzerindeydi; bozuk/kötü niyetli bir başlık bu boşluğu kullanıp
+    // devasa bant tamponları (bkz. main.rs stream_page_bands) tahsis ettirebilirdi.
+    const MAX_DPI: u32 = 1200; // PPD'deki en yüksek *Resolution seçeneği
+    const MAX_POINTS: u32 = 1300; // En büyük *PageSize (Legal: 1008 pt) + pay
+    // ~1300pt * 1200dpi / 72 / 8 ≈ 2709 B (1-bit); yuvarlanıp pay bırakıldı.
+    const MAX_BYTES_PER_LINE: u32 = 4096;
+    // ~1300pt * 1200dpi / 72 ≈ 21667 satır; yuvarlanıp pay bırakıldı.
+    const MAX_LINES: u32 = 24_000;
 
     let invalid = |msg: String| Err(io::Error::new(io::ErrorKind::InvalidData, msg));
 
@@ -136,6 +149,36 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
             header.page_size_points
         ));
     }
+
+    // ML-2160 serisi QPDL motoru tek düzlemli, 1-bit monokrom (K) raster
+    // bekler: stream_page_bands her baytı doğrudan tek bir siyah/beyaz
+    // düzlem olarak yorumlayıp koşulsuz tersliyor (bkz. o fonksiyondaki
+    // polarite açıklaması). Bu varsayımla uyuşmayan bir akış (ör. 24-bit RGB
+    // ya da 32-bit CMYK) sessizce 1-bit monokrom sanılıp yazıcıya
+    // gönderilirse şerit hizalaması bozulur, firmware senkronizasyonu
+    // kaybolur ve gereksiz toner tüketimine yol açar; bu yüzden erken
+    // reddediyoruz.
+    if header.color_space != CupsColorSpace::K {
+        return invalid(format!(
+            "Desteklenmeyen renk uzayı: {} (yalnızca 1-bit K/monokrom destekleniyor)",
+            header.color_space
+        ));
+    }
+    if header.bits_per_color != 1 || header.bits_per_pixel != 1 {
+        return invalid(format!(
+            "Desteklenmeyen bit derinliği: bitsPerColor={}, bitsPerPixel={} (yalnızca 1-bit monokrom destekleniyor)",
+            header.bits_per_color, header.bits_per_pixel
+        ));
+    }
+    let expected_bytes_per_line =
+        (header.width as u64 * header.bits_per_pixel as u64).div_ceil(8);
+    if expected_bytes_per_line != header.bytes_per_line as u64 {
+        return invalid(format!(
+            "cupsBytesPerLine ({}) cupsWidth ({}) ile tutarsız (beklenen: {})",
+            header.bytes_per_line, header.width, expected_bytes_per_line
+        ));
+    }
+
     Ok(())
 }
 
@@ -415,4 +458,76 @@ fn print_header_info(page_num: u32, header: &PageHeader) {
     );
     eprintln!("  Kopya Sayısı    : {}", header.num_copies);
     eprintln!("--------------------------------------------------");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raster::CupsRasterVersion;
+
+    /// A4, 600 DPI, 1-bit monokrom (K), tutarlı `bytesPerLine`'a sahip
+    /// geçerli bir başlık üretir; testler bunu temel alıp tek bir alanı
+    /// bozarak `validate_page_header`'ın onu reddettiğini doğrular.
+    fn valid_header() -> PageHeader {
+        let mut buf = vec![0u8; 1796];
+        buf[276..280].copy_from_slice(&600u32.to_be_bytes()); // hw_resolution[0]
+        buf[280..284].copy_from_slice(&600u32.to_be_bytes()); // hw_resolution[1]
+        buf[352..356].copy_from_slice(&595u32.to_be_bytes()); // page_size_points[0] (A4)
+        buf[356..360].copy_from_slice(&842u32.to_be_bytes()); // page_size_points[1]
+        buf[372..376].copy_from_slice(&8u32.to_be_bytes()); // width
+        buf[376..380].copy_from_slice(&8u32.to_be_bytes()); // height
+        buf[384..388].copy_from_slice(&1u32.to_be_bytes()); // bits_per_color
+        buf[388..392].copy_from_slice(&1u32.to_be_bytes()); // bits_per_pixel
+        buf[392..396].copy_from_slice(&1u32.to_be_bytes()); // bytes_per_line = ceil(8*1/8)
+        buf[400..404].copy_from_slice(&3u32.to_be_bytes()); // color_space = K
+        PageHeader::parse(&buf, CupsRasterVersion::V2Be).unwrap()
+    }
+
+    #[test]
+    fn test_validate_page_header_accepts_valid_mono_header() {
+        assert!(validate_page_header(&valid_header()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_page_header_rejects_non_k_color_space() {
+        let mut header = valid_header();
+        header.color_space = CupsColorSpace::Rgb;
+        assert!(validate_page_header(&header).is_err());
+    }
+
+    #[test]
+    fn test_validate_page_header_rejects_wrong_bit_depth() {
+        // 24-bit RGB / 32-bit CMYK gibi çok bitli bir akış simüle edilir.
+        let mut header = valid_header();
+        header.bits_per_color = 8;
+        header.bits_per_pixel = 24;
+        assert!(validate_page_header(&header).is_err());
+    }
+
+    #[test]
+    fn test_validate_page_header_rejects_inconsistent_bytes_per_line() {
+        let mut header = valid_header();
+        header.bytes_per_line = 999; // width=8, bits_per_pixel=1 ile uyuşmuyor
+        assert!(validate_page_header(&header).is_err());
+    }
+
+    #[test]
+    fn test_validate_page_header_rejects_oversized_fields() {
+        let mut over_dpi = valid_header();
+        over_dpi.hw_resolution = [9999, 9999];
+        assert!(validate_page_header(&over_dpi).is_err());
+
+        let mut over_points = valid_header();
+        over_points.page_size_points = [999_999, 999_999];
+        assert!(validate_page_header(&over_points).is_err());
+
+        let mut over_lines = valid_header();
+        over_lines.height = 9_999_999;
+        assert!(validate_page_header(&over_lines).is_err());
+
+        let mut over_bpl = valid_header();
+        over_bpl.width = 9_999_999;
+        over_bpl.bytes_per_line = 9_999_999;
+        assert!(validate_page_header(&over_bpl).is_err());
+    }
 }

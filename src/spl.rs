@@ -393,6 +393,14 @@ impl Algo0x11 {
 // SPL2 / QPDL Akış Yöneticisi (SplStreamWriter)
 // ============================================================================
 
+/// PJL alanlarına (JOBNAME, USERNAME vb.) izin verilen azami karakter sayısı.
+///
+/// PJL yorumlayıcıları genelde küçük, sabit boyutlu satır tamponları kullanır;
+/// bu üst sınır, gerçekçi bir belge başlığını/kullanıcı adını kesmeden,
+/// megabaytlarca metnin yazıcı firmware'ine gönderilmesini (olası çökme veya
+/// tampon taşması) engeller.
+const MAX_PJL_FIELD_CHARS: usize = 128;
+
 /// PJL akışına gömülecek serbest metin alanlarını (JOBNAME, USERNAME vb.) güvenli hale getirir.
 ///
 /// PJL satır tabanlıdır ve alıntılanmış (`"..."`) dizeleri için bir kaçış
@@ -403,9 +411,14 @@ impl Algo0x11 {
 /// (dolayısıyla işi gönderen istemciden) geldiği için güvenilmez kabul
 /// edilmeli. Kaçış mekanizması olmadığından, izin verilmeyen baytları
 /// (tüm kontrol karakterleri) ve alıntılanmış alanları bozmamak için çift
-/// tırnağı kaçırmak yerine tamamen kaldırıyoruz.
+/// tırnağı kaçırmak yerine tamamen kaldırıyoruz; ardından sonucu
+/// `MAX_PJL_FIELD_CHARS` ile sınırlıyoruz.
 fn sanitize_pjl_field(input: &str) -> String {
-    input.chars().filter(|c| !c.is_control() && *c != '"').collect()
+    input
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .take(MAX_PJL_FIELD_CHARS)
+        .collect()
 }
 
 pub struct SplStreamWriter<W: Write> {
@@ -606,6 +619,16 @@ mod tests {
         assert!(!injected.contains('"'));
         assert!(!injected.contains('\n'));
         assert!(!injected.contains('\r'));
+    }
+
+    #[test]
+    fn test_sanitize_pjl_field_enforces_max_length() {
+        let huge = "A".repeat(1_000_000);
+        let sanitized = sanitize_pjl_field(&huge);
+        assert_eq!(sanitized.chars().count(), MAX_PJL_FIELD_CHARS);
+
+        let short = "short title";
+        assert_eq!(sanitize_pjl_field(short), short);
     }
 
     #[test]
