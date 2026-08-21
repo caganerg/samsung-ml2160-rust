@@ -158,7 +158,21 @@ impl Default for JobConfig {
 pub struct PageConfig {
     pub paper_size: SplPaperSize,
     pub paper_source: SplPaperSource,
-    pub resolution: SplResolution,
+    /// Yatay (X) çözünürlük — QPDL sayfa başlığında `header[0x10]`.
+    ///
+    /// SpliX qpdl.cpp renderPage:
+    ///   header[0x1]  = page->yResolution() / 100;
+    ///   header[0x10] = page->xResolution() / 100;
+    ///
+    /// İki eksen AYRI alanlardır ve sıraları sezgiye aykırıdır (önce Y, sonra
+    /// X). Daha önce tek bir `resolution` alanı vardı ve her iki bayta da
+    /// YATAY çözünürlük yazılıyordu; simetrik modlarda (300/600/1200) bu fark
+    /// edilmiyordu, ama `1200x600dpi` gibi gerçek bir QPDL modunda yazıcıya
+    /// dikey çözünürlük 600 yerine 1200 olarak bildiriliyor ve sayfa dikeyde
+    /// 2 kat eziliyordu.
+    pub resolution_x: SplResolution,
+    /// Dikey (Y) çözünürlük — QPDL sayfa başlığında `header[0x1]`.
+    pub resolution_y: SplResolution,
     pub duplex: SplDuplex,
     pub copies: u16,
     /// QPDL sayfa başlığındaki genişlik alanı 16-bit'tir; tip de öyle.
@@ -181,7 +195,8 @@ impl Default for PageConfig {
         Self {
             paper_size: SplPaperSize::A4,
             paper_source: SplPaperSource::Auto,
-            resolution: SplResolution::Dpi600,
+            resolution_x: SplResolution::Dpi600,
+            resolution_y: SplResolution::Dpi600,
             duplex: SplDuplex::Simplex,
             copies: 1,
             width_pixels: 4768,
@@ -672,7 +687,7 @@ impl<W: Write> SplStreamWriter<W> {
 
         let mut header = [0u8; 17];
         header[0x0] = 0x00; // Sayfa Başlığı İmzası
-        header[0x1] = (config.resolution.dpi() / 100) as u8; // 6 (600 DPI)
+        header[0x1] = (config.resolution_y.dpi() / 100) as u8; // DİKEY (Y) çözünürlük / 100
         header[0x2] = (config.copies >> 8) as u8;
         header[0x3] = (config.copies & 0xFF) as u8;
         header[0x4] = config.paper_size as u8; // A4 = 2
@@ -688,7 +703,7 @@ impl<W: Write> SplStreamWriter<W> {
         header[0xD] = 0x00; // unknownByte2
         header[0xE] = config.qpdl_version; // 3
         header[0xF] = 0x01; // Colorplanes = 1 (Monokrom)
-        header[0x10] = (config.resolution.dpi() / 100) as u8; // 6 (600 DPI)
+        header[0x10] = (config.resolution_x.dpi() / 100) as u8; // YATAY (X) çözünürlük / 100
 
         self.writer.write_all(&header)?;
         Ok(())
@@ -1121,6 +1136,56 @@ mod tests {
         assert_eq!(&out[0x5..0x7], &[0xFF, 0xFF], "genişlik kırpıldı");
         assert_eq!(&out[0x7..0x9], &[0xAB, 0xCD], "yükseklik kırpıldı");
         assert_eq!(out.len(), 17);
+    }
+
+    /// D-05 regresyonu: QPDL sayfa başlığında `header[0x1]` DİKEY (Y),
+    /// `header[0x10]` ise YATAY (X) çözünürlüğü taşır — bu sırada.
+    ///
+    /// Kaynak, OpenPrinting SpliX qpdl.cpp renderPage:
+    ///   header[0x1]  = page->yResolution() / 100;
+    ///   header[0x10] = page->xResolution() / 100;
+    ///
+    /// Sıra sezgiye aykırı olduğu için ("önce Y, sonra X") kolayca ters
+    /// yazılabilir. Daha önce tek bir alan vardı ve her iki bayta da YATAY
+    /// çözünürlük gidiyordu; simetrik modlarda görünmeyen, `1200x600dpi`'da
+    /// sayfayı dikeyde 2 kat ezen bir hataydı.
+    #[test]
+    fn test_begin_page_maps_resolution_axes_to_correct_bytes() {
+        // Asimetrik: X = 1200, Y = 600 (gerçek bir QPDL modu).
+        let cfg = PageConfig {
+            resolution_x: SplResolution::Dpi1200,
+            resolution_y: SplResolution::Dpi600,
+            ..PageConfig::default()
+        };
+        let mut out: Vec<u8> = Vec::new();
+        SplStreamWriter::new(&mut out).begin_page(&cfg).unwrap();
+
+        assert_eq!(out[0x1], 6, "header[0x1] DİKEY (Y) çözünürlük olmalı: 600/100");
+        assert_eq!(out[0x10], 12, "header[0x10] YATAY (X) çözünürlük olmalı: 1200/100");
+
+        // Ters yön: eksenlerin gerçekten ayrı taşındığını kanıtlar.
+        let swapped = PageConfig {
+            resolution_x: SplResolution::Dpi600,
+            resolution_y: SplResolution::Dpi1200,
+            ..PageConfig::default()
+        };
+        let mut out2: Vec<u8> = Vec::new();
+        SplStreamWriter::new(&mut out2).begin_page(&swapped).unwrap();
+        assert_eq!(out2[0x1], 12);
+        assert_eq!(out2[0x10], 6);
+
+        // Simetrik durumda iki bayt eşit (eski davranışla uyum).
+        for dpi in [SplResolution::Dpi300, SplResolution::Dpi600, SplResolution::Dpi1200] {
+            let sym = PageConfig {
+                resolution_x: dpi,
+                resolution_y: dpi,
+                ..PageConfig::default()
+            };
+            let mut o: Vec<u8> = Vec::new();
+            SplStreamWriter::new(&mut o).begin_page(&sym).unwrap();
+            assert_eq!(o[0x1], o[0x10]);
+            assert_eq!(o[0x1] as u32, dpi.dpi() / 100);
+        }
     }
 
     #[test]

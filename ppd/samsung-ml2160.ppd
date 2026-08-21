@@ -40,15 +40,16 @@
 *% Resolution Options
 *% Not: Samsung ML-2160 serisi motoru 600x600 DPI yerel (hardware native) çözünürlüğe
 *% sahiptir. 1200 DPI pazarlama değeri motor interpolasyonudur.
-*% Asimetrik "1200x600dpi" seçeneği kaldırıldı: QPDL sayfa başlığı tek bir
-*% çözünürlük değeri taşıdığı için filtre iki ekseni ayrı bildiremiyor ve bu
-*% mod sayfayı dikeyde 2 kat eziyordu (bkz. src/main.rs, D-03).
+*% "1200x600dpi" gerçek bir QPDL modudur: bu motor ailesinde 1200 DPI, dikeyde
+*% 600 satır + yatayda daha hızlı lazer modülasyonu ile elde edilir. OpenPrinting
+*% SpliX de aynı seçeneği ml2010/ml2015/ml1640/ml2510/ml2525 PPD'lerinde sunar.
 *% ============================================================================
 *OpenUI *Resolution/Resolution: PickOne
 *OrderDependency: 10 AnySetup *Resolution
 *DefaultResolution: 600dpi
 *Resolution 300dpi/300 DPI (Draft): "<</HWResolution[300 300]>>setpagedevice"
 *Resolution 600dpi/600 DPI (Normal - Native): "<</HWResolution[600 600]>>setpagedevice"
+*Resolution 1200x600dpi/1200x600 DPI (High Quality): "<</HWResolution[1200 600]>>setpagedevice"
 *Resolution 1200dpi/1200 DPI (Best): "<</HWResolution[1200 1200]>>setpagedevice"
 *CloseUI: *Resolution
 

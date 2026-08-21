@@ -207,33 +207,6 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
     {
         return invalid(format!("Geçersiz çözünürlük: {:?}", header.hw_resolution));
     }
-
-    // D-03: yatay ve dikey çözünürlük EŞİT olmalı.
-    //
-    // QPDL 17 baytlık sayfa başlığı TEK bir çözünürlük değeri taşıyor
-    // (bkz. spl.rs begin_page: `header[0x1]` ve `header[0x10]`, ikisi de
-    // `resolution.dpi() / 100`). Elimizde bu iki baytın gerçekten X ve Y
-    // eksenlerine karşılık geldiğini gösteren bir kanıt YOK — SpliX kaynağı
-    // ya da donanım üzerinde doğrulama olmadan bunlardan birine farklı bir
-    // değer yazmak protokol tahmini olur. Dolayısıyla asimetrik çözünürlük
-    // bu filtreyle sadakatle kodlanamıyor.
-    //
-    // Sessizce devam etmek somut biçimde yanlış: yatay bant genişliği
-    // `hw_resolution[0]`'dan, satır sayısı ise üreticinin `hw_resolution[1]`
-    // ile hesapladığı `cupsHeight`'tan geliyor; yazıcıya ise tek bir değer
-    // (X) bildiriliyor. `1200x600dpi` seçilmiş bir A4 sayfasında ölçülen
-    // sonuç: yatay 8,27 inç (doğru), dikey 5,68 inç (11,69 olmalıydı) —
-    // yani 2 kat dikey ezilme. Bu yüzden akış açık bir hatayla reddediliyor;
-    // PPD'den de `*Resolution 1200x600dpi` seçeneği kaldırıldı ki CUPS böyle
-    // bir iş üretmeye hiç kalkışmasın.
-    if header.hw_resolution[0] != header.hw_resolution[1] {
-        return invalid(format!(
-            "Asimetrik çözünürlük desteklenmiyor: {} x {} DPI. QPDL sayfa başlığı tek bir \
-             çözünürlük değeri taşır; farklı eksenler dikey ölçek hatasına yol açar. \
-             Kuyruğu simetrik bir çözünürlükle (300/600/1200 DPI) yapılandırın.",
-            header.hw_resolution[0], header.hw_resolution[1]
-        ));
-    }
     if header.page_size_points[0] == 0
         || header.page_size_points[0] > MAX_POINTS
         || header.page_size_points[1] == 0
@@ -566,7 +539,11 @@ fn process_cups_raster_to_spl<W: Write>(
                 header.page_size_points[1],
             ),
             paper_source: SplPaperSource::Auto,
-            resolution: SplResolution::from_dpi(header.hw_resolution[0]),
+            // Eksenler AYRI: QPDL `header[0x1]` dikey, `header[0x10]` yatay
+            // çözünürlüğü taşır (bkz. spl.rs PageConfig). `1200x600dpi` bu
+            // motor ailesinde gerçek bir moddur.
+            resolution_x: SplResolution::from_dpi(header.hw_resolution[0]),
+            resolution_y: SplResolution::from_dpi(header.hw_resolution[1]),
             duplex: if header.duplex {
                 SplDuplex::LongEdge
             } else {
@@ -1024,10 +1001,7 @@ mod tests {
 
         // PPD gerçekten ayrıştırıldı mı? (Dosya yeniden düzenlenirse sessizce
         // hiçbir şey doğrulamayan bir test kalmasın.)
-        // Sayaç DPI BİLEŞENİ başına artar (`1200x600dpi` iki bileşendir).
-        // PPD üç simetrik seçenek sunuyor: 300, 600, 1200. Asimetrik
-        // `1200x600dpi`, D-03 gereği kaldırıldı.
-        assert!(resolutions >= 3, "PPD'den çözünürlük okunamadı: {}", resolutions);
+        assert!(resolutions >= 4, "PPD'den çözünürlük okunamadı: {}", resolutions);
         assert!(papers >= 10, "PPD'den kağıt boyutu okunamadı: {}", papers);
     }
 
@@ -1170,60 +1144,66 @@ mod tests {
         assert!(validate_page_header(&h300).is_ok());
     }
 
-    /// D-03: QPDL sayfa başlığı tek bir çözünürlük değeri taşıdığı için
-    /// asimetrik akış sadakatle kodlanamıyor; sessizce dikeyde ezmek yerine
-    /// reddediliyor.
+    /// Asimetrik çözünürlük (`1200x600dpi`) DESTEKLENEN gerçek bir QPDL
+    /// modudur — SpliX de aynı seçeneği ml2010/ml2015/ml1640/ml2510/ml2525
+    /// PPD'lerinde sunar — ve reddedilmemelidir.
     #[test]
-    fn test_validate_page_header_rejects_asymmetric_resolution() {
+    fn test_validate_page_header_accepts_asymmetric_resolution() {
+        // A4 @ 1200x600: cupsfilter'ın gerçekte ürettiği değerler.
         let mut h = valid_header();
         h.hw_resolution = [1200, 600];
-        let err = validate_page_header(&h).expect_err("asimetrik çözünürlük reddedilmeliydi");
+        h.width = 9522;
+        h.bytes_per_line = 1191;
+        h.height = 6816;
         assert!(
-            err.to_string().contains("Asimetrik çözünürlük"),
-            "hata nedeni açıklanmalı: {}",
-            err
+            validate_page_header(&h).is_ok(),
+            "1200x600dpi gerçek bir QPDL modu, reddedilmemeli: {:?}",
+            validate_page_header(&h).err()
         );
-
-        // Ters yön de.
-        h.hw_resolution = [600, 1200];
-        assert!(validate_page_header(&h).is_err());
-
-        // Simetrik olan her PPD çözünürlüğü kabul edilmeli.
-        for dpi in [300u32, 600, 1200] {
-            let mut ok = valid_header();
-            ok.hw_resolution = [dpi, dpi];
-            ok.width = 8;
-            ok.bytes_per_line = 1;
-            ok.height = 1;
-            assert!(
-                validate_page_header(&ok).is_ok(),
-                "{} DPI simetrik akış kabul edilmeli",
-                dpi
-            );
-        }
     }
 
-    /// PPD artık asimetrik bir çözünürlük seçeneği SUNMAMALI: sunulursa CUPS,
-    /// filtrenin D-03 gereği reddedeceği bir iş üretir ve kullanıcı sebebi
-    /// belirsiz bir "filter failed" görür.
+    /// PPD'nin sunduğu her çözünürlük, filtre tarafından da kabul edilmeli:
+    /// aksi hâlde kullanıcı sebebi belirsiz bir "filter failed" görür.
     #[test]
-    fn test_ppd_offers_no_asymmetric_resolution() {
+    fn test_filter_accepts_every_ppd_resolution() {
         let ppd = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/ppd/samsung-ml2160.ppd"
         ))
         .expect("PPD okunamadı");
 
+        let mut checked = 0;
         for line in ppd.lines() {
-            if let Some(rest) = line.strip_prefix("*Resolution ") {
-                let name = rest.split('/').next().unwrap_or("");
-                assert!(
-                    !name.trim_end_matches("dpi").contains('x'),
-                    "PPD asimetrik çözünürlük sunuyor, filtre bunu reddedecek: {}",
-                    line
-                );
-            }
+            // *Resolution 1200x600dpi/...  ->  HWResolution[1200 600]
+            let Some(rest) = line.strip_prefix("*Resolution ") else {
+                continue;
+            };
+            let name = rest.split('/').next().unwrap_or("").trim_end_matches("dpi");
+            let (x, y) = match name.split_once('x') {
+                Some((a, b)) => (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap()),
+                None => {
+                    let v = name.parse::<u32>().unwrap();
+                    (v, v)
+                }
+            };
+
+            // O çözünürlükte A4 için tutarlı bir başlık kur.
+            let mut h = valid_header();
+            h.hw_resolution = [x, y];
+            h.width = (595 * x).div_ceil(72);
+            h.bytes_per_line = h.width.div_ceil(8);
+            h.width = h.bytes_per_line * 8;
+            h.height = (842 * y).div_ceil(72);
+            assert!(
+                validate_page_header(&h).is_ok(),
+                "PPD {}x{} DPI sunuyor ama filtre reddediyor: {:?}",
+                x,
+                y,
+                validate_page_header(&h).err()
+            );
+            checked += 1;
         }
+        assert!(checked >= 4, "PPD'den çözünürlük okunamadı: {}", checked);
     }
 
     /// D-04 regresyonu: `cupsColorOrder` artık denetleniyor.
