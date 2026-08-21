@@ -207,6 +207,33 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
     {
         return invalid(format!("Geçersiz çözünürlük: {:?}", header.hw_resolution));
     }
+
+    // D-03: yatay ve dikey çözünürlük EŞİT olmalı.
+    //
+    // QPDL 17 baytlık sayfa başlığı TEK bir çözünürlük değeri taşıyor
+    // (bkz. spl.rs begin_page: `header[0x1]` ve `header[0x10]`, ikisi de
+    // `resolution.dpi() / 100`). Elimizde bu iki baytın gerçekten X ve Y
+    // eksenlerine karşılık geldiğini gösteren bir kanıt YOK — SpliX kaynağı
+    // ya da donanım üzerinde doğrulama olmadan bunlardan birine farklı bir
+    // değer yazmak protokol tahmini olur. Dolayısıyla asimetrik çözünürlük
+    // bu filtreyle sadakatle kodlanamıyor.
+    //
+    // Sessizce devam etmek somut biçimde yanlış: yatay bant genişliği
+    // `hw_resolution[0]`'dan, satır sayısı ise üreticinin `hw_resolution[1]`
+    // ile hesapladığı `cupsHeight`'tan geliyor; yazıcıya ise tek bir değer
+    // (X) bildiriliyor. `1200x600dpi` seçilmiş bir A4 sayfasında ölçülen
+    // sonuç: yatay 8,27 inç (doğru), dikey 5,68 inç (11,69 olmalıydı) —
+    // yani 2 kat dikey ezilme. Bu yüzden akış açık bir hatayla reddediliyor;
+    // PPD'den de `*Resolution 1200x600dpi` seçeneği kaldırıldı ki CUPS böyle
+    // bir iş üretmeye hiç kalkışmasın.
+    if header.hw_resolution[0] != header.hw_resolution[1] {
+        return invalid(format!(
+            "Asimetrik çözünürlük desteklenmiyor: {} x {} DPI. QPDL sayfa başlığı tek bir \
+             çözünürlük değeri taşır; farklı eksenler dikey ölçek hatasına yol açar. \
+             Kuyruğu simetrik bir çözünürlükle (300/600/1200 DPI) yapılandırın.",
+            header.hw_resolution[0], header.hw_resolution[1]
+        ));
+    }
     if header.page_size_points[0] == 0
         || header.page_size_points[0] > MAX_POINTS
         || header.page_size_points[1] == 0
@@ -286,6 +313,40 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
         ));
     }
 
+    // D-02: `cupsHeight`, sayfanın FİZİKSEL yüksekliğine sığmalı.
+    //
+    // D-01'in dikey karşılığı. Yükseklik bugüne kadar yalnızca global
+    // `MAX_LINES` sınırına karşı denetleniyordu; sayfanın kendi boyutuyla hiç
+    // karşılaştırılmıyordu. Kendi içinde tutarlı ama sayfayla tutarsız bir
+    // başlık (ör. `PageSize = 595 x 1 pt` + `cupsHeight = 24000`) böylece
+    // kabul ediliyor, QPDL sayfa başlığına 24000 satırlık bir yükseklik
+    // yazılıyor ve sayfaya sığandan 3-4 kat fazla bant gönderiliyordu.
+    // Yazıcıya bildirilen boyut ile gerçekte gönderilen veri miktarının
+    // ayrışması, D-01'de olduğu gibi yazıcı tarafında hizalama/senkron kaybı
+    // ve gereksiz kâğıt/toner tüketimi anlamına gelir.
+    //
+    // Payın 8 satır olmasının nedeni: genişlikten farklı olarak burada 8'e
+    // hizalama YOK, yani `compute_page_height_lines` fazladan bir baş boşluk
+    // bırakmıyor; pay yalnızca üretici tarafın farklı yuvarlaması (ceil yerine
+    // round, ya da küçük bir bloğa hizalama) ihtimalini karşılıyor. Gerçek
+    // cups-filters çıktısı bu sınırın çok altında kalır, çünkü PPD'nin
+    // `*ImageableArea` kenar boşluklarını düşer: A4 @600 DPI'da fiziksel
+    // 7017 satıra karşılık üretilen `cupsHeight` 6816'dır (12 pt üst + 12 pt
+    // alt = 200 satır eksik); aynı fark 300 DPI'da 100, 1200 DPI'da 400
+    // satırdır. Yani meşru hiçbir iş bu kontrole takılmaz.
+    const HEIGHT_OVERSHOOT_SLACK_LINES: u32 = 8;
+    let page_height_lines =
+        compute_page_height_lines(header.page_size_points[1], header.hw_resolution[1]);
+    if header.height > page_height_lines + HEIGHT_OVERSHOOT_SLACK_LINES {
+        return invalid(format!(
+            "cupsHeight ({}) sayfa yüksekliğine sığmıyor: {} pt @ {} DPI => en fazla {} satır",
+            header.height,
+            header.page_size_points[1],
+            header.hw_resolution[1],
+            page_height_lines
+        ));
+    }
+
     Ok(())
 }
 
@@ -300,6 +361,21 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
 fn compute_page_width_pixels(page_size_pt: u32, x_dpi: u32) -> u32 {
     let px = (page_size_pt as f64 * x_dpi as f64 / 72.0).ceil() as u32;
     (px + 7) & !7u32
+}
+
+/// Sayfanın fiziksel yüksekliğinin kaç raster satırına karşılık geldiği.
+///
+/// `compute_page_width_pixels`'in dikey karşılığı, iki farkla: dikey eksende
+/// bant/DMA hizalaması gerekmediği için 8'e yuvarlama YOKTUR, ve dikey
+/// çözünürlük `hw_resolution[1]`'dir — PPD `1200x600dpi` gibi asimetrik bir
+/// seçenek sunduğu için bu ayrım gerçekten tetiklenebilir.
+///
+/// Yalnızca `validate_page_header`'ın D-02 kontrolünde bir ÜST SINIR olarak
+/// kullanılır; sayfa döngüsü satır sayısını (D-01'deki genişlik gibi) buna
+/// göre yeniden ölçeklemez, çünkü gönderilecek satır sayısı `cupsHeight`
+/// tarafından belirlenir.
+fn compute_page_height_lines(page_size_pt: u32, y_dpi: u32) -> u32 {
+    (page_size_pt as f64 * y_dpi as f64 / 72.0).ceil() as u32
 }
 
 /// Tek bir baskı işinde işlenecek azami sayfa sayısı.
@@ -948,7 +1024,10 @@ mod tests {
 
         // PPD gerçekten ayrıştırıldı mı? (Dosya yeniden düzenlenirse sessizce
         // hiçbir şey doğrulamayan bir test kalmasın.)
-        assert!(resolutions >= 4, "PPD'den çözünürlük okunamadı: {}", resolutions);
+        // Sayaç DPI BİLEŞENİ başına artar (`1200x600dpi` iki bileşendir).
+        // PPD üç simetrik seçenek sunuyor: 300, 600, 1200. Asimetrik
+        // `1200x600dpi`, D-03 gereği kaldırıldı.
+        assert!(resolutions >= 3, "PPD'den çözünürlük okunamadı: {}", resolutions);
         assert!(papers >= 10, "PPD'den kağıt boyutu okunamadı: {}", papers);
     }
 
@@ -989,6 +1068,162 @@ mod tests {
         too_wide.width = 4976; // 622 bayt
         too_wide.bytes_per_line = 622;
         assert!(validate_page_header(&too_wide).is_err(), "2 bayt aşım reddedilmeli");
+    }
+
+    /// D-02: `cupsHeight` sayfanın fiziksel yüksekliğine sığmalı — D-01'in
+    /// dikey karşılığı. Yamadan önce bu başlık kabul ediliyordu.
+    #[test]
+    fn test_validate_page_header_rejects_page_taller_than_paper() {
+        let mut header = valid_header();
+        header.page_size_points = [595, 1]; // 1 pt yüksek "sayfa"
+        header.height = 24_000; // MAX_LINES içinde, ama sayfaya sığmıyor
+        let err = validate_page_header(&header).expect_err("uzun sayfa reddedilmeliydi");
+        assert!(
+            err.to_string().contains("sayfa yüksekliğine sığmıyor"),
+            "hata nedeni açıklanmalı: {}",
+            err
+        );
+
+        // Normal boyutlu bir A4 sayfasında da aşım yakalanmalı: 842 pt @ 600
+        // DPI = 7017 satır; gerçek cups-filters çıktısı 6816'dır.
+        let mut a4 = valid_header();
+        a4.height = 24_000;
+        assert!(
+            validate_page_header(&a4).is_err(),
+            "A4'e sığmayan yükseklik reddedilmeli"
+        );
+    }
+
+    /// Aşırı düzeltme kontrolü: gerçek `cupsfilter` çıktısının ürettiği
+    /// yükseklikler reddedilmemeli. Değerler, ppd/samsung-ml2160.ppd ile
+    /// `cupsfilter -m application/vnd.cups-raster` çalıştırılarak ölçüldü;
+    /// hepsi fiziksel sınırın altında kalır çünkü `*ImageableArea` kenar
+    /// boşlukları (12 pt üst + 12 pt alt) düşülür.
+    #[test]
+    fn test_validate_page_header_accepts_real_cupsfilter_heights() {
+        // (sayfa_yüksekliği_pt, y_dpi, ölçülen cupsHeight)
+        let measured = [
+            (842u32, 300u32, 3408u32), // A4
+            (842, 600, 6816),
+            (842, 1200, 13632),
+            (792, 600, 6400), // Letter
+            (1008, 600, 8200), // Legal
+            (1008, 1200, 16400),
+            (420, 600, 3296), // A6
+            (936, 1200, 15200), // Folio
+        ];
+        for (page_pt, ydpi, cups_height) in measured {
+            let mut h = valid_header();
+            h.page_size_points = [595, page_pt];
+            // D-03 gereği eksenler eşit; ölçümler zaten simetrik
+            // çözünürlüklerden alındı.
+            h.hw_resolution = [ydpi, ydpi];
+            h.height = cups_height;
+            assert!(
+                validate_page_header(&h).is_ok(),
+                "gerçek cupsfilter çıktısı reddedildi: {} pt @ {} DPI => {} satır",
+                page_pt,
+                ydpi,
+                cups_height
+            );
+        }
+    }
+
+    /// Yuvarlama payı: 8 satırlık aşım hoş görülür, fazlası reddedilir.
+    #[test]
+    fn test_validate_page_header_height_slack_is_eight_lines() {
+        // 842 pt @ 600 DPI => ceil(842 * 600 / 72) = 7017 satır.
+        let exact = compute_page_height_lines(842, 600);
+        assert_eq!(exact, 7017);
+
+        let mut ok = valid_header();
+        ok.height = exact + 8;
+        assert!(validate_page_header(&ok).is_ok(), "8 satırlık pay kabul edilmeli");
+
+        let mut too_tall = valid_header();
+        too_tall.height = exact + 9;
+        assert!(validate_page_header(&too_tall).is_err(), "9 satır aşım reddedilmeli");
+    }
+
+    /// Yükseklik sınırı dikey çözünürlüğe bağlı olmalı: `compute_page_height_lines`
+    /// `hw_resolution[1]`'i alır, `[0]`'ı değil. D-03 asimetrik akışları zaten
+    /// reddettiği için bu, yardımcının kendisi üzerinden doğrulanıyor.
+    #[test]
+    fn test_page_height_lines_uses_vertical_resolution() {
+        assert_eq!(compute_page_height_lines(842, 600), 7017);
+        assert_eq!(compute_page_height_lines(842, 300), 3509);
+        assert_eq!(compute_page_height_lines(842, 1200), 14034);
+
+        // Sınır gerçekten çözünürlükle ölçekleniyor: 600 DPI'da geçerli olan
+        // bir yükseklik, aynı kağıtta 300 DPI'da reddedilmeli.
+        let mut h300 = valid_header();
+        h300.hw_resolution = [300, 300];
+        h300.width = 2480;
+        h300.bytes_per_line = 310;
+        h300.height = 6816; // 600 DPI'nın satır sayısı
+        assert!(
+            validate_page_header(&h300).is_err(),
+            "300 DPI'da 600 DPI'nın satır sayısı kabul edilmemeli"
+        );
+
+        h300.height = 3408; // 300 DPI için gerçek cupsfilter değeri
+        assert!(validate_page_header(&h300).is_ok());
+    }
+
+    /// D-03: QPDL sayfa başlığı tek bir çözünürlük değeri taşıdığı için
+    /// asimetrik akış sadakatle kodlanamıyor; sessizce dikeyde ezmek yerine
+    /// reddediliyor.
+    #[test]
+    fn test_validate_page_header_rejects_asymmetric_resolution() {
+        let mut h = valid_header();
+        h.hw_resolution = [1200, 600];
+        let err = validate_page_header(&h).expect_err("asimetrik çözünürlük reddedilmeliydi");
+        assert!(
+            err.to_string().contains("Asimetrik çözünürlük"),
+            "hata nedeni açıklanmalı: {}",
+            err
+        );
+
+        // Ters yön de.
+        h.hw_resolution = [600, 1200];
+        assert!(validate_page_header(&h).is_err());
+
+        // Simetrik olan her PPD çözünürlüğü kabul edilmeli.
+        for dpi in [300u32, 600, 1200] {
+            let mut ok = valid_header();
+            ok.hw_resolution = [dpi, dpi];
+            ok.width = 8;
+            ok.bytes_per_line = 1;
+            ok.height = 1;
+            assert!(
+                validate_page_header(&ok).is_ok(),
+                "{} DPI simetrik akış kabul edilmeli",
+                dpi
+            );
+        }
+    }
+
+    /// PPD artık asimetrik bir çözünürlük seçeneği SUNMAMALI: sunulursa CUPS,
+    /// filtrenin D-03 gereği reddedeceği bir iş üretir ve kullanıcı sebebi
+    /// belirsiz bir "filter failed" görür.
+    #[test]
+    fn test_ppd_offers_no_asymmetric_resolution() {
+        let ppd = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı");
+
+        for line in ppd.lines() {
+            if let Some(rest) = line.strip_prefix("*Resolution ") {
+                let name = rest.split('/').next().unwrap_or("");
+                assert!(
+                    !name.trim_end_matches("dpi").contains('x'),
+                    "PPD asimetrik çözünürlük sunuyor, filtre bunu reddedecek: {}",
+                    line
+                );
+            }
+        }
     }
 
     /// D-04 regresyonu: `cupsColorOrder` artık denetleniyor.

@@ -76,8 +76,11 @@ echo -e "${GREEN} -> Filtre ikili dosyası hazır: $TARGET_BIN${NC}"
 
 # 3. cupsfilter ile PDF'i CUPS Raster'a Çevir
 echo -e "\n${YELLOW}[3/5] cupsfilter ile Samsung ML-2160 CUPS Raster akışı üretiliyor...${NC}"
-cupsfilter -p "$PPD_FILE" -m application/vnd.cups-raster "$PDF_INPUT" > "$RASTER_FILE" 2>/dev/null || \
-cupsfilter -p "$PPD_FILE" "$PDF_INPUT" > "$RASTER_FILE"
+# `--` ayracı şart: `PDF_INPUT` var olan bir dosya olarak doğrulanıyor ama adı
+# `-` ile başlayabilir (`./test_pipeline.sh -o`), o durumda cupsfilter onu dosya
+# değil SEÇENEK olarak ayrıştırır.
+cupsfilter -p "$PPD_FILE" -m application/vnd.cups-raster -- "$PDF_INPUT" > "$RASTER_FILE" 2>/dev/null || \
+cupsfilter -p "$PPD_FILE" -- "$PDF_INPUT" > "$RASTER_FILE"
 
 # cupsfilter kısmi başarısızlıkta 0 ile çıkıp boş/kırpık dosya bırakabiliyor;
 # boş bir raster ile devam etmek testi anlamsız biçimde "başarılı" gösterir.

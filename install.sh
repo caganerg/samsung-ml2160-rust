@@ -109,23 +109,34 @@ echo -e "\n${YELLOW}[3/5] Installing filter binary: $FILTER_DEST (sudo may be re
 # başkalarınca yazılabilir bir yoldaysa (paylaşımlı mount, geniş izinli /srv),
 # derleme ile kopyalama arasında ikili değiştirilip root sahipli bir CUPS
 # filtresi olarak kurulabilir. Kopyalamadan önce kaynak zincirini doğrula.
+#
+# Aynı güvence PPD için de gerekli ve zincire onun yolu da dahil: aşağıdaki
+# `sudo lpadmin -P "$PPD_SRC"` PPD'yi root olarak okuyup /etc/cups/ppd/ altına
+# kopyalıyor. PPD bir yapılandırma dosyası değil, çalıştırılacak programları
+# BELİRLEYEN bir dosyadır: `*cupsFilter`/`*cupsFilter2` satırında mutlak bir
+# yol verilebilir ve CUPS bunu onurlandırır, yani değiştirilmiş bir PPD her
+# baskı işinde `lp` kullanıcısı olarak keyfi bir program çalıştırır. İkili için
+# kapatılan saldırı yolunun aynısı olduğu için aynı denetimden geçiyor.
 assert_not_writable_by_others() {
     local path="$1" perms owner
     perms="$(stat -c '%a' "$path")" || exit 1
     owner="$(stat -c '%u' "$path")" || exit 1
     if [[ "$owner" != "$EUID" && "$owner" != "0" ]]; then
         echo -e "${RED}ERROR: $path is owned by uid $owner (neither you nor root).${NC}"
-        echo -e "${RED}Refusing to install a binary as root from a path you do not control.${NC}"
+        echo -e "${RED}Refusing to install a binary or PPD as root from a path you do not control.${NC}"
         exit 1
     fi
     if (( 8#$perms & 8#022 )); then
         echo -e "${RED}ERROR: $path is group- or world-writable (mode $perms).${NC}"
-        echo -e "${RED}Another user could swap the filter binary before it is installed as root.${NC}"
+        echo -e "${RED}Another user could swap the filter binary or the PPD before they are${NC}"
+        echo -e "${RED}installed as root; a substituted PPD runs arbitrary programs as user 'lp'.${NC}"
         echo -e "${RED}Fix with: chmod go-w $path${NC}"
         exit 1
     fi
 }
-for p in "$SCRIPT_DIR" "$SCRIPT_DIR/target" "$SCRIPT_DIR/target/release" "$SCRIPT_DIR/$FILTER_BIN"; do
+for p in "$SCRIPT_DIR" \
+         "$SCRIPT_DIR/target" "$SCRIPT_DIR/target/release" "$SCRIPT_DIR/$FILTER_BIN" \
+         "$SCRIPT_DIR/ppd" "$PPD_SRC"; do
     assert_not_writable_by_others "$p"
 done
 

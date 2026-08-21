@@ -716,9 +716,11 @@ mod tests {
 
     #[test]
     fn test_cups_sync_words() {
-        // v2 (`RaS2`/`2SaR`) artık `new()` tarafından reddediliyor (bkz.
-        // test_rejects_compressed_v2_streams), bu yüzden burada kabul edilen
-        // sürümler üzerinden doğruluyoruz.
+        // Altı sürüm de kabul edilir; v2 (`RaS2`/`2SaR`) sayfa verisini
+        // satır-RLE ile taşır ve `CupsLineDecoder` tarafından şeffaf biçimde
+        // çözülür (bkz. main.rs `test_v2_and_v3_streams_produce_identical_output`).
+        // Burada temsilci olarak bir v3 ve bir v1 akışı üzerinden sürüm/endian
+        // eşlemesini doğruluyoruz, v2'nin bayrakları ise aşağıda ayrıca.
         let v3_be = b"RaS3";
         let reader = CupsRasterReader::new(Cursor::new(v3_be)).unwrap();
         assert_eq!(reader.version(), CupsRasterVersion::V3Be);
