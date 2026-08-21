@@ -67,7 +67,7 @@ echo -e "${GREEN} -> CUPS Raster dosyası üretildi ($RASTER_SIZE bayt): $RASTER
 # 4. CUPS Raster'ı Rust SPL Filtresinden Geçir
 echo -e "\n${YELLOW}[4/5] Raster verisi Rust filtresinden geçirilerek SPL çıktısı alınıyor...${NC}"
 # CUPS parametreleri ile çağrı simülasyonu: job-id user title num-copies options [file]
-"$TARGET_BIN" 101 cagan "Test_Belgesi" 1 "media=A4 resolution=600dpi" "$RASTER_FILE" > "$SPL_OUTPUT"
+"$TARGET_BIN" 101 testuser "Test_Belgesi" 1 "media=A4 resolution=600dpi" "$RASTER_FILE" > "$SPL_OUTPUT"
 
 SPL_SIZE=$(stat -c%s "$SPL_OUTPUT" 2>/dev/null || stat -f%z "$SPL_OUTPUT")
 echo -e "${GREEN} -> SPL dosyası üretildi ($SPL_SIZE bayt): $SPL_OUTPUT${NC}"

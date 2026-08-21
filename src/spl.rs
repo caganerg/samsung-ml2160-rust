@@ -146,7 +146,7 @@ impl Default for JobConfig {
     fn default() -> Self {
         Self {
             job_name: "CUPS Document".to_string(),
-            user_name: "cagan".to_string(),
+            user_name: "guest".to_string(),
             service_date: "20120101".to_string(),
             duplex: SplDuplex::Simplex,
         }
