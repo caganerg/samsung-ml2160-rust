@@ -161,8 +161,18 @@ pub struct PageConfig {
     pub resolution: SplResolution,
     pub duplex: SplDuplex,
     pub copies: u16,
-    pub width_pixels: u32,
-    pub height_pixels: u32,
+    /// QPDL sayfa başlığındaki genişlik alanı 16-bit'tir; tip de öyle.
+    ///
+    /// Bu alanlar önce `u32`'ydi ve `begin_page` onları `>> 8` / `& 0xFF` ile
+    /// sessizce kırpıyordu: 16-bit'e sığmayan bir değer, yazıcıya bildirilen
+    /// boyut ile gerçek payload'ın uyuşmamasına (DMA/RLE çözme senkron kaybı)
+    /// yol açardı. Genişlik için açık bir kontrol vardı, yükseklik için yoktu
+    /// ve yükseklik yalnızca `validate_page_header`'daki `MAX_LINES` sınırı
+    /// sayesinde DOLAYLI olarak korunuyordu. Alanları `u16` yapmak, çağıranı
+    /// dönüşümü (`try_into`) açıkça ele almaya zorlar ve kırpılmayı tip
+    /// düzeyinde imkânsız kılar.
+    pub width_pixels: u16,
+    pub height_pixels: u16,
     pub qpdl_version: u8,
 }
 
@@ -189,10 +199,14 @@ pub struct Algo0x11;
 
 impl Algo0x11 {
     pub fn lookup_best_offsets(data: &[u8]) -> [u16; TABLE_PTR_SIZE] {
-        let mut occurrences = [(0u32, 0usize); COMPRESS_SAMPLE_RATE];
-        for i in 0..COMPRESS_SAMPLE_RATE {
-            occurrences[i] = (0, i);
-        }
+        // Bu tablo 2048 x (u32, usize) = 32 KB tutar. Daha önce yığıtta
+        // (stack) bir dizi olarak duruyordu: ana iş parçacığının 8 MB'lık
+        // yığıtında sorun değil, ama kod ileride bir iş parçacığına taşınırsa
+        // (varsayılan 2 MB) sessiz bir yığıt taşması riski oluşturur. Bant
+        // başına bir tahsis, sıkıştırmanın kendi maliyetinin yanında ölçülemez
+        // düzeyde kaldığı için öbeğe (heap) taşındı.
+        let mut occurrences: Vec<(u32, usize)> =
+            (0..COMPRESS_SAMPLE_RATE).map(|i| (0u32, i)).collect();
 
         if data.len() >= COMPRESS_SAMPLE_RATE {
             let mut i = COMPRESS_SAMPLE_RATE;
@@ -289,6 +303,25 @@ impl Algo0x11 {
                         continue;
                     }
                     let r_ref = r - off;
+
+                    // Bu ofset mevcut en iyi eşleşmeyi GEÇEMEYECEKSE hiç
+                    // karşılaştırma yapma: eşleşme uzunluğu ancak
+                    // `best_comp_counter`'dan BÜYÜKSE dikkate alınıyor, o
+                    // hâlde `best_comp_counter`ıncı bayt tutmuyorsa bu aday
+                    // en fazla o kadar uzayabilir ve sonucu değiştiremez.
+                    // Klasik LZ kısayolu; seçilen eşleşmeyi ve işaretçiyi
+                    // aynen korur, yalnızca en kötü durumdaki bayt
+                    // karşılaştırma sayısını düşürür.
+                    //
+                    // İndis güvenliği: döngü içindeyken `best_comp_counter`
+                    // her zaman `max_comp_size`'dan KÜÇÜKTÜR (eşit olduğu anda
+                    // aşağıda `break` edilir) ve `max_comp_size <= data.len() - r`
+                    // olduğu için `r + best_comp_counter < data.len()`;
+                    // `r_ref < r` olduğundan ikinci indis de sınır içindedir.
+                    if data[r + best_comp_counter] != data[r_ref + best_comp_counter] {
+                        continue;
+                    }
+
                     let mut counter = 0;
                     while counter < max_comp_size && data[r + counter] == data[r_ref + counter] {
                         counter += 1;
@@ -393,66 +426,171 @@ impl Algo0x11 {
 // SPL2 / QPDL Akış Yöneticisi (SplStreamWriter)
 // ============================================================================
 
-/// PJL alanlarına (JOBNAME, USERNAME vb.) izin verilen azami karakter sayısı.
+/// PJL alanlarına (JOBNAME, USERNAME vb.) izin verilen azami BAYT sayısı.
 ///
 /// PJL yorumlayıcıları genelde küçük, sabit boyutlu satır tamponları kullanır;
 /// bu üst sınır, gerçekçi bir belge başlığını/kullanıcı adını kesmeden,
 /// megabaytlarca metnin yazıcı firmware'ine gönderilmesini (olası çökme veya
 /// tampon taşması) engeller.
-const MAX_PJL_FIELD_CHARS: usize = 128;
+///
+/// Sınır kasıtlı olarak BAYT cinsindendir. Daha önce karakter sayılıyordu ve
+/// `.take(128)` bir `char` iteratörü üzerinde çalıştığı için çok baytlı UTF-8
+/// girdiyle gerçek sınır dört katına çıkabiliyordu: 400 emojilik bir iş adı
+/// 531 baytlık bir PJL satırı üretiyordu. `sanitize_pjl_field` çıktısı artık
+/// saf ASCII olduğu için bayt ve karakter sayısı da eşitlenmiş oluyor.
+const MAX_PJL_FIELD_BYTES: usize = 128;
 
-/// PJL akışına gömülecek serbest metin alanlarını (JOBNAME, USERNAME vb.) güvenli hale getirir.
+/// Bir karakterin, PJL alanına doğrudan yazılabilecek kadar güvenli olup
+/// olmadığını söyler: yazdırılabilir ASCII (0x20-0x7E), çift tırnak hariç.
 ///
-/// PJL satır tabanlıdır ve alıntılanmış (`"..."`) dizeleri için bir kaçış
-/// (escape) mekanizması yoktur: gömülen bir CR/LF ya da ESC (Universal Exit
-/// Language'ın başlangıcı) baytı, alanı erken sonlandırıp ardından gelen
-/// metnin yazıcı tarafından tamamen yeni, keyfi bir PJL komutu/işi olarak
-/// yorumlanmasına yol açabilir. `job_name`/`user_name` CUPS iş başlığından
-/// (dolayısıyla işi gönderen istemciden) geldiği için güvenilmez kabul
-/// edilmeli. Kaçış mekanizması olmadığından, izin verilmeyen baytları
-/// (tüm kontrol karakterleri) ve alıntılanmış alanları bozmamak için çift
-/// tırnağı kaçırmak yerine tamamen kaldırıyoruz; ardından sonucu
-/// `MAX_PJL_FIELD_CHARS` ile sınırlıyoruz.
-/// `char::is_control()`'un kaçırdığı, ama yine de bir PJL alanına
-/// yerleştirilmesi güvensiz olan Unicode karakterleri denetler.
-///
-/// `is_control()` yalnızca ASCII/Latin-1 kontrol karakterlerini (Unicode
-/// "Cc" kategorisi: C0 0x00-0x1F ve C1 0x80-0x9F) yakalar. Aşağıdaki
-/// karakterler bu kategoride DEĞİLDİR ama aynı sınıf soruna yol açar:
-/// - U+2028/U+2029 (Satır/Paragraf Ayırıcı): bazı metin işleyicileri
-///   bunları CR/LF gibi bir satır sonu sayar.
-/// - U+202A-U+202E, U+2066-U+2069 (Bidi gömme/override/izolasyon, ör.
-///   RLO): görüntülenen metnin sırasını tersine çevirip bir job/kullanıcı
-///   adının loglarda veya yazıcı panelinde farklı (sahte) görünmesine yol
-///   açabilir — klasik dosya adı sahteciliği tekniğinin aynısı.
-/// - U+200B-U+200F, U+FEFF (sıfır genişlikli boşluk/birleştirici, BOM):
-///   görünmez baytlar ekleyip metni gizlice değiştirebilir.
-///
-/// Normal çok-baytlı UTF-8 karakterler (ör. Türkçe "ğ", "ı", "ş") kasıtlı
-/// olarak dokunulmadan bırakılıyor; yalnızca bu bilinen tehlikeli
-/// kategoriler engelleniyor.
-fn is_unsafe_pjl_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2028}' | '\u{2029}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{FEFF}'
-    )
+/// Çift tırnak, alıntılanmış (`"..."`) alanı erken kapatabilir; PJL'de bir
+/// kaçış (escape) mekanizması olmadığı için kaçırmak yerine tamamen atılır.
+#[inline]
+fn is_safe_pjl_ascii(c: char) -> bool {
+    matches!(c, ' '..='~') && c != '"'
 }
 
+/// ASCII dışı bir harfi, anlamını koruyan ASCII karşılığına katlar.
+///
+/// Beyaz liste saf ASCII olduğu için Türkçe bir iş adı ("Öğrenci Başvurusu")
+/// aksi hâlde okunamaz hâle gelirdi ("renci Bavurusu"). Katlama, güvenlikten
+/// ödün vermeden okunabilirliği koruyor: çıktı yine tamamen 0x20-0x7E
+/// aralığında kalıyor ve yazıcı firmware'inin PJL sembol seti hakkında
+/// hiçbir varsayım yapılmıyor.
+///
+/// Tablo Türkçe'yi tam kapsar; yaygın Batı Avrupa harfleri de eklenmiştir.
+/// Listede olmayan ASCII dışı her karakter (CJK, emoji, semboller) atılır.
+fn ascii_fold(c: char) -> Option<&'static str> {
+    Some(match c {
+        // --- Türkçe ---
+        'ç' => "c", 'Ç' => "C",
+        'ğ' => "g", 'Ğ' => "G",
+        'ı' => "i", 'İ' => "I",
+        'ö' => "o", 'Ö' => "O",
+        'ş' => "s", 'Ş' => "S",
+        'ü' => "u", 'Ü' => "U",
+        'â' => "a", 'Â' => "A",
+        'î' => "i", 'Î' => "I",
+        'û' => "u", 'Û' => "U",
+        // --- Yaygın Batı Avrupa harfleri ---
+        'á' | 'à' | 'ä' | 'ã' | 'å' => "a",
+        'Á' | 'À' | 'Ä' | 'Ã' | 'Å' => "A",
+        'é' | 'è' | 'ê' | 'ë' => "e",
+        'É' | 'È' | 'Ê' | 'Ë' => "E",
+        'í' | 'ì' | 'ï' => "i",
+        'Í' | 'Ì' | 'Ï' => "I",
+        'ó' | 'ò' | 'ô' | 'õ' | 'ø' => "o",
+        'Ó' | 'Ò' | 'Ô' | 'Õ' | 'Ø' => "O",
+        'ú' | 'ù' => "u",
+        'Ú' | 'Ù' => "U",
+        'ñ' => "n", 'Ñ' => "N",
+        'ý' | 'ÿ' => "y", 'Ý' => "Y",
+        'ð' => "d", 'Ð' => "D",
+        'þ' => "th", 'Þ' => "TH",
+        'æ' => "ae", 'Æ' => "AE",
+        'ß' => "ss",
+        // --- Orta/Doğu Avrupa (Latin Extended-A/B) ---
+        'ć' | 'č' | 'ĉ' | 'ċ' => "c", 'Ć' | 'Č' | 'Ĉ' | 'Ċ' => "C",
+        'ś' | 'š' | 'ș' | 'ŝ' => "s", 'Ś' | 'Š' | 'Ș' | 'Ŝ' => "S",
+        'ź' | 'ż' | 'ž' => "z", 'Ź' | 'Ż' | 'Ž' => "Z",
+        'ł' | 'ĺ' | 'ľ' => "l", 'Ł' | 'Ĺ' | 'Ľ' => "L",
+        'ń' | 'ň' | 'ņ' => "n", 'Ń' | 'Ň' | 'Ņ' => "N",
+        'đ' | 'ď' => "d", 'Đ' | 'Ď' => "D",
+        'ť' | 'ţ' | 'ț' => "t", 'Ť' | 'Ţ' | 'Ț' => "T",
+        'ř' | 'ŕ' => "r", 'Ř' | 'Ŕ' => "R",
+        'ě' | 'ē' | 'ė' | 'ę' | 'ĕ' => "e", 'Ě' | 'Ē' | 'Ė' | 'Ę' | 'Ĕ' => "E",
+        'ā' | 'ă' | 'ą' => "a", 'Ā' | 'Ă' | 'Ą' => "A",
+        'ī' | 'ĭ' | 'į' | 'ĩ' => "i", 'Ī' | 'Ĭ' | 'Į' | 'Ĩ' => "I",
+        'ō' | 'ŏ' | 'ő' => "o", 'Ō' | 'Ŏ' | 'Ő' => "O",
+        'ū' | 'ů' | 'ű' | 'ų' | 'ũ' | 'ŭ' => "u", 'Ū' | 'Ů' | 'Ű' | 'Ų' | 'Ũ' => "U",
+        'ġ' | 'ģ' => "g", 'Ġ' | 'Ģ' => "G",
+        'ķ' => "k", 'Ķ' => "K",
+        'ŷ' => "y", 'Ŷ' | 'Ÿ' => "Y",
+        'ŵ' => "w", 'Ŵ' => "W",
+        'ĵ' => "j", 'Ĵ' => "J",
+        'ħ' | 'ĥ' => "h", 'Ħ' | 'Ĥ' => "H",
+        'œ' => "oe", 'Œ' => "OE",
+        'ŀ' => "l", 'Ŀ' => "L",
+        'ŉ' => "n",
+        'ŧ' => "t", 'Ŧ' => "T",
+        'ĳ' => "ij", 'Ĳ' => "IJ",
+        // --- Tipografik noktalama ---
+        '\u{2018}' | '\u{2019}' => "'",
+        // Eğri çift tırnaklar BOŞ dizeye katlanır, düz `"`'ye değil: düz tırnak
+        // alıntılanmış PJL alanını erken kapatırdı (bkz. is_safe_pjl_ascii).
+        '\u{201C}' | '\u{201D}' => "",
+        '\u{2013}' | '\u{2014}' => "-",
+        '\u{2026}' => "...",
+        '\u{00A0}' => " ",
+        _ => return None,
+    })
+}
+
+/// PJL akışına gömülecek serbest metin alanlarını (JOBNAME, USERNAME vb.)
+/// güvenli hale getirir.
+///
+/// PJL satır tabanlıdır ve alıntılanmış (`"..."`) dizeleri için bir kaçış
+/// mekanizması yoktur: gömülen bir CR/LF ya da ESC (Universal Exit Language'ın
+/// başlangıcı) baytı, alanı erken sonlandırıp ardından gelen metnin yazıcı
+/// tarafından tamamen yeni, keyfi bir PJL komutu/işi olarak yorumlanmasına yol
+/// açabilir. `job_name`/`user_name` CUPS iş başlığından (dolayısıyla işi
+/// gönderen istemciden) geldiği için güvenilmez kabul edilmeli.
+///
+/// Süzgeç bir KARA LİSTE değil, bayt düzeyinde bir BEYAZ LİSTEdir. Önceki
+/// `char::is_control()` tabanlı kara liste `char` düzeyinde çalışıyordu, oysa
+/// yazıcıya giden şey bayt dizisidir: C1 aralığındaki (0x80-0x9F) her bayt,
+/// çok baytlı bir UTF-8 karakterinin DEVAM BAYTI olarak süzgeçten geçebiliyordu.
+/// Örneğin `U+02DB` telde `CB 9B` olur ve `0x9B` (C1 CSI) firmware'e ulaşırdı.
+/// Beyaz liste bunu yapısal olarak imkânsız kılar: çıktının her baytı
+/// 0x20-0x7E aralığındadır.
+///
+/// Enjeksiyon açısından kritik baytlar (`0x1B` ESC, `0x0A`, `0x0D`) zaten
+/// UTF-8'de ne öncü ne devam baytı olarak görünemez; beyaz liste bunları da
+/// kapsar ve garantiyi UTF-8 kodlamasının özelliğine değil, süzgecin kendisine
+/// dayandırır.
+///
+/// Uzunluk `MAX_PJL_FIELD_BYTES` ile bayt cinsinden sınırlanır ve sınır,
+/// katlama sonrası genişleyebilen diziler ("ß" -> "ss") da hesaba katılarak
+/// üretim sırasında uygulanır.
 fn sanitize_pjl_field(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| !c.is_control() && *c != '"' && !is_unsafe_pjl_char(*c))
-        .take(MAX_PJL_FIELD_CHARS)
-        .collect()
+    let mut out = String::with_capacity(MAX_PJL_FIELD_BYTES);
+
+    for c in input.chars() {
+        // `piece` her zaman saf ASCII'dir, dolayısıyla len() == karakter sayısı.
+        let piece: &str = if is_safe_pjl_ascii(c) {
+            // Tek ASCII karakteri kopyalamak için geçici bir tampon gerekmesin
+            // diye burada doğrudan itiyoruz.
+            if out.len() + 1 > MAX_PJL_FIELD_BYTES {
+                break;
+            }
+            out.push(c);
+            continue;
+        } else if let Some(folded) = ascii_fold(c) {
+            folded
+        } else {
+            // Beyaz listede olmayan her şey (kontrol karakterleri, bidi
+            // override, sıfır genişlikli karakterler, emoji, CJK) atılır.
+            continue;
+        };
+
+        if out.len() + piece.len() > MAX_PJL_FIELD_BYTES {
+            break;
+        }
+        out.push_str(piece);
+    }
+
+    debug_assert!(out.is_ascii(), "sanitize_pjl_field çıktısı ASCII olmalı");
+    out
 }
 
 pub struct SplStreamWriter<W: Write> {
     writer: W,
     current_band: u8,
+    /// `begin_job` çağrıldı ama `end_job` henüz çağrılmadı mı?
+    ///
+    /// `Drop` uygulaması bunu okuyarak, yarıda kalan bir işin kapanış UEL'ini
+    /// yazmayı garanti eder; bkz. `impl Drop for SplStreamWriter`.
+    job_active: bool,
 }
 
 impl<W: Write> SplStreamWriter<W> {
@@ -460,6 +598,7 @@ impl<W: Write> SplStreamWriter<W> {
         Self {
             writer,
             current_band: 0,
+            job_active: false,
         }
     }
 
@@ -520,6 +659,10 @@ impl<W: Write> SplStreamWriter<W> {
 
         self.writer.write_all(&pjl)?;
         self.writer.flush()?;
+
+        // Bu noktadan itibaren yazıcı QPDL dilindedir ve akışın mutlaka bir
+        // kapanış UEL'i ile bitmesi gerekir.
+        self.job_active = true;
         Ok(())
     }
 
@@ -533,10 +676,8 @@ impl<W: Write> SplStreamWriter<W> {
         header[0x2] = (config.copies >> 8) as u8;
         header[0x3] = (config.copies & 0xFF) as u8;
         header[0x4] = config.paper_size as u8; // A4 = 2
-        header[0x5] = (config.width_pixels >> 8) as u8;
-        header[0x6] = (config.width_pixels & 0xFF) as u8;
-        header[0x7] = (config.height_pixels >> 8) as u8;
-        header[0x8] = (config.height_pixels & 0xFF) as u8;
+        header[0x5..0x7].copy_from_slice(&config.width_pixels.to_be_bytes());
+        header[0x7..0x9].copy_from_slice(&config.height_pixels.to_be_bytes());
         header[0x9] = config.paper_source as u8; // Auto = 1
         header[0xA] = 0x00; // unknownByte1
         header[0xB] = match config.duplex {
@@ -623,10 +764,43 @@ impl<W: Write> SplStreamWriter<W> {
     ///
     /// Gerçek SpliX (printer.cpp sendPJLFooter) `_endPJL`'i olduğu gibi yazıp
     /// hemen flush eder; sona fazladan bir "\n" EKLEMEZ.
+    ///
+    /// Çağrı idempotenttir: `begin_job` çağrılmamışsa ya da iş zaten
+    /// kapatılmışsa hiçbir şey yazmaz. Böylece `Drop` içindeki güvenlik ağı
+    /// (aşağıya bkz.) başarılı akışlarda ikinci bir UEL üretmez.
     pub fn end_job(&mut self) -> io::Result<()> {
+        if !self.job_active {
+            return Ok(());
+        }
+        // Bayrağı yazmadan ÖNCE düşür: yazma başarısızsa (ör. backend boruyu
+        // kapattıysa) `Drop` aynı başarısız yazmayı tekrar denemesin.
+        self.job_active = false;
         self.writer.write_all(PJL_END)?;
         self.writer.flush()?;
         Ok(())
+    }
+}
+
+/// Yarıda kalan bir işi kapanış UEL'i ile sonlandıran güvenlik ağı.
+///
+/// `begin_job` `@PJL ENTER LANGUAGE = QPDL` yazdığı anda yazıcı QPDL diline
+/// geçer. Akış kapanış UEL'i olmadan biterse yazıcı bu dilde, tamamlanmamış
+/// bir bant kaydını bekler hâlde asılı kalır ve sıradaki iş de bu artık
+/// duruma girer. Önceden `end_job` yalnızca sayfa döngüsü BAŞARIYLA bittiğinde
+/// çağrılıyordu; aradaki her `?` (başlık doğrulama hatası, kısa okuma, bozuk
+/// sayfa) akışı yarım bırakıyordu.
+///
+/// DİKKAT: `std::process::exit` yığındaki `Drop`'ları ÇALIŞTIRMAZ. Bu ağın
+/// işlemesi için writer'ın, hata `main`'e ulaşıp `exit` çağrılmadan önce
+/// düşürülmüş olması gerekir — bu yüzden writer `process_cups_raster_to_spl`
+/// içinde yerel olarak yaşar ve hata `?` ile döndürülür.
+impl<W: Write> Drop for SplStreamWriter<W> {
+    fn drop(&mut self) {
+        if self.job_active {
+            // Hatayı raporlayacak bir yer yok; akışı kapatmaya çalışmak yine de
+            // hiç denememekten iyidir.
+            let _ = self.end_job();
+        }
     }
 }
 
@@ -674,22 +848,156 @@ mod tests {
         }
     }
 
+    /// Beyaz liste saf ASCII olduğu için Türkçe metin katlanarak korunur;
+    /// harfler sessizce düşürülmez ("renci Bavurusu" olmaz).
     #[test]
-    fn test_sanitize_pjl_field_preserves_legitimate_non_ascii() {
-        // Bloklama listesi yalnızca bilinen tehlikeli Unicode
-        // kategorilerini hedefler; Türkçe gibi meşru çok baytlı
-        // karakterler değiştirilmeden kalmalı.
-        assert_eq!(sanitize_pjl_field("Öğrenci Başvurusu"), "Öğrenci Başvurusu");
+    fn test_sanitize_pjl_field_folds_turkish_to_ascii() {
+        assert_eq!(sanitize_pjl_field("Öğrenci Başvurusu"), "Ogrenci Basvurusu");
+        assert_eq!(sanitize_pjl_field("Çiğdem ÜNLÜ"), "Cigdem UNLU");
+        assert_eq!(sanitize_pjl_field("ışık İSTANBUL"), "isik ISTANBUL");
     }
 
+    /// Katlama tablosunda olmayan ASCII dışı karakterler atılır; çevrelerindeki
+    /// meşru metin korunur.
     #[test]
-    fn test_sanitize_pjl_field_enforces_max_length() {
+    fn test_sanitize_pjl_field_drops_unmappable_non_ascii() {
+        assert_eq!(sanitize_pjl_field("Rapor \u{1F600} 2026"), "Rapor  2026");
+        assert_eq!(sanitize_pjl_field("会議 notes"), " notes");
+    }
+
+    /// Katlama tablosu, Latin-1 Supplement'teki TÜM harfleri kapsamalı.
+    ///
+    /// Beyaz liste güvenliği tablodan bağımsız garanti eder (kapsanmayan
+    /// karakter atılır, sızmaz); tablonun kapsamı yalnızca OKUNABİLİRLİĞİ
+    /// belirler. Bu test, Batı Avrupa alfabesindeki hiçbir harfin sessizce
+    /// düşmemesini sabitler.
+    #[test]
+    fn test_ascii_fold_covers_all_latin1_letters() {
+        let mut missing = Vec::new();
+        for cp in 0x00C0u32..=0x00FF {
+            let c = char::from_u32(cp).unwrap();
+            if c == '\u{00D7}' || c == '\u{00F7}' {
+                continue; // × ve ÷ harf değil, çarpma/bölme işaretleri
+            }
+            match ascii_fold(c) {
+                Some(folded) if !folded.is_empty() && folded.is_ascii() => {}
+                _ => missing.push(format!("U+{:04X} ({})", cp, c)),
+            }
+        }
+        assert!(missing.is_empty(), "katlanamayan Latin-1 harfleri: {:?}", missing);
+    }
+
+    /// Katlama tablosunun HER çıktısı yazdırılabilir ASCII olmalı ve alanı
+    /// bozacak bir karakter içermemeli.
+    #[test]
+    fn test_ascii_fold_outputs_are_always_safe() {
+        for cp in 0u32..0x2500 {
+            if let Some(c) = char::from_u32(cp) {
+                if let Some(folded) = ascii_fold(c) {
+                    assert!(
+                        folded.bytes().all(|b| (0x20..=0x7E).contains(&b)),
+                        "U+{:04X} yazdırılamayan bayta katlandı: {:?}",
+                        cp,
+                        folded
+                    );
+                    assert!(
+                        !folded.contains('"'),
+                        "U+{:04X} çift tırnağa katlandı; alıntılanmış alanı bozar",
+                        cp
+                    );
+                }
+            }
+        }
+    }
+
+    /// O-03 regresyonu: çıktının HER baytı 0x20-0x7E aralığında olmalı.
+    ///
+    /// Eski `char::is_control()` kara listesi `char` düzeyinde çalıştığı için
+    /// C1 aralığındaki baytlar çok baytlı UTF-8'in devam baytı olarak
+    /// sızabiliyordu: `U+02DB` telde `CB 9B` olur ve `0x9B` (C1 CSI)
+    /// firmware'e ulaşırdı.
+    #[test]
+    fn test_sanitize_pjl_field_output_is_always_printable_ascii() {
+        let hostile = "A\u{02DB}B\u{0219}C\u{1E9B}D\u{FF02}E\u{202E}F\u{1F4A9}";
+        let out = sanitize_pjl_field(hostile);
+        assert!(
+            out.bytes().all(|b| (0x20..=0x7E).contains(&b)),
+            "yazdırılamayan bayt sızdı: {:?}",
+            out.as_bytes()
+        );
+        assert!(!out.as_bytes().contains(&0x9B), "C1 CSI baytı sızdı");
+        assert!(!out.contains('"'));
+
+        // Aynı garanti geniş bir Unicode taramasında da geçerli olmalı.
+        for cp in (0u32..0x3000).chain(0x1F300..0x1F400) {
+            if let Some(c) = char::from_u32(cp) {
+                let s = format!("x{}y", c);
+                let out = sanitize_pjl_field(&s);
+                assert!(
+                    out.bytes().all(|b| (0x20..=0x7E).contains(&b)) && !out.contains('"'),
+                    "U+{:04X} güvensiz bayt üretti: {:?}",
+                    cp,
+                    out.as_bytes()
+                );
+            }
+        }
+    }
+
+    /// O-02 regresyonu: sınır BAYT cinsinden olmalı.
+    ///
+    /// Karakter sayan eski sınır, çok baytlı UTF-8 ile gerçek satır uzunluğunu
+    /// dört katına çıkarabiliyordu (400 emojilik başlık -> 531 baytlık satır).
+    #[test]
+    fn test_sanitize_pjl_field_enforces_max_byte_length() {
         let huge = "A".repeat(1_000_000);
-        let sanitized = sanitize_pjl_field(&huge);
-        assert_eq!(sanitized.chars().count(), MAX_PJL_FIELD_CHARS);
+        assert_eq!(sanitize_pjl_field(&huge).len(), MAX_PJL_FIELD_BYTES);
+
+        // Çok baytlı girdi de aynı BAYT sınırına uymalı.
+        for probe in ["Ö", "\u{1F600}", "ß", "ğ"] {
+            let s = probe.repeat(4000);
+            let out = sanitize_pjl_field(&s);
+            assert!(
+                out.len() <= MAX_PJL_FIELD_BYTES,
+                "{:?} sınırı aştı: {} bayt",
+                probe,
+                out.len()
+            );
+        }
 
         let short = "short title";
         assert_eq!(sanitize_pjl_field(short), short);
+    }
+
+    /// Katlanınca genişleyen diziler ("ß" -> "ss") sınırı taşırmamalı.
+    #[test]
+    fn test_sanitize_pjl_field_respects_limit_for_expanding_folds() {
+        let out = sanitize_pjl_field(&"ß".repeat(200));
+        assert!(out.len() <= MAX_PJL_FIELD_BYTES);
+        assert!(out.bytes().all(|b| b == b's'));
+    }
+
+    /// Üretilen PJL satırının tamamı bayt sınırının makul bir katında kalmalı.
+    #[test]
+    fn test_pjl_lines_stay_short_with_multibyte_input() {
+        let cfg = JobConfig {
+            job_name: "\u{1F600}".repeat(400),
+            user_name: "Ö".repeat(400),
+            service_date: "20120101".to_string(),
+            duplex: SplDuplex::Simplex,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut w = SplStreamWriter::new(&mut out);
+            w.begin_job(&cfg).unwrap();
+            w.end_job().unwrap();
+        }
+        for line in out.split(|&b| b == b'\n') {
+            assert!(
+                line.len() <= MAX_PJL_FIELD_BYTES + 64,
+                "aşırı uzun PJL satırı: {} bayt",
+                line.len()
+            );
+        }
     }
 
     #[test]
@@ -711,12 +1019,22 @@ mod tests {
             duplex: SplDuplex::Simplex,
         };
 
+        // İşler açıkça kapatılır: writer düşerken `Drop` kapanış UEL'ini
+        // yazacağı için (bkz. test_drop_writes_closing_uel_for_unfinished_job)
+        // iki akış da tam bir iş olsun, aşağıdaki UEL sayımı yalnızca
+        // ENJEKTE EDİLMİŞ zarfları ölçsün.
         let mut out_malicious: Vec<u8> = Vec::new();
-        SplStreamWriter::new(&mut out_malicious)
-            .begin_job(&malicious)
-            .unwrap();
+        {
+            let mut w = SplStreamWriter::new(&mut out_malicious);
+            w.begin_job(&malicious).unwrap();
+            w.end_job().unwrap();
+        }
         let mut out_benign: Vec<u8> = Vec::new();
-        SplStreamWriter::new(&mut out_benign).begin_job(&benign).unwrap();
+        {
+            let mut w = SplStreamWriter::new(&mut out_benign);
+            w.begin_job(&benign).unwrap();
+            w.end_job().unwrap();
+        }
 
         // Kötü niyetli girdi, zararsız girdiyle AYNI sayıda PJL satırı
         // üretmeli: sanitizasyon başarısız olsaydı gömülü "\n" ekstra
@@ -728,13 +1046,81 @@ mod tests {
             "girdi ekstra PJL komut satırı enjekte edebildi"
         );
 
-        // Akışta, baştaki tek UEL dışında başka bir UEL (yeni bir PJL
-        // zarfı/iş başlangıcı) bulunmamalı.
-        let uel_count = out_malicious
-            .windows(PJL_UEL.len())
-            .filter(|w| *w == PJL_UEL)
-            .count();
-        assert_eq!(uel_count, 1, "girdi yeni bir UEL zarfı enjekte edebildi");
+        // Akışta yalnızca işin kendi açılış ve kapanış UEL'i bulunmalı;
+        // girdi üçüncü bir zarf (yeni bir iş başlangıcı) ekleyememeli.
+        let uel_count = count_uel(&out_malicious);
+        assert_eq!(uel_count, count_uel(&out_benign));
+        assert_eq!(uel_count, 2, "girdi yeni bir UEL zarfı enjekte edebildi");
+    }
+
+    /// Akıştaki UEL (yeni PJL zarfı) sayısını döner.
+    fn count_uel(stream: &[u8]) -> usize {
+        stream.windows(PJL_UEL.len()).filter(|w| *w == PJL_UEL).count()
+    }
+
+    /// Y-03 regresyonu: `begin_job` çağrıldıktan sonra `end_job` çağrılmadan
+    /// writer düşerse, `Drop` kapanış UEL'ini yazmalı.
+    ///
+    /// `begin_job` yazıcıyı `@PJL ENTER LANGUAGE = QPDL` ile QPDL diline
+    /// sokar; akış UEL olmadan biterse yazıcı bu dilde asılı kalır ve sonraki
+    /// iş de bozulur.
+    #[test]
+    fn test_drop_writes_closing_uel_for_unfinished_job() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut w = SplStreamWriter::new(&mut out);
+            w.begin_job(&JobConfig::default()).unwrap();
+            w.begin_page(&PageConfig::default()).unwrap();
+            // end_job YOK: hata yolunu taklit ediyoruz.
+        }
+        assert!(
+            out.ends_with(PJL_END),
+            "yarım kalan iş kapanış UEL'i olmadan bitti"
+        );
+        assert_eq!(count_uel(&out), 2, "açılış + kapanış UEL'i beklenir");
+    }
+
+    /// `end_job` açıkça çağrıldıysa `Drop` ikinci bir UEL yazmamalı.
+    #[test]
+    fn test_drop_does_not_duplicate_uel_after_end_job() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut w = SplStreamWriter::new(&mut out);
+            w.begin_job(&JobConfig::default()).unwrap();
+            w.end_job().unwrap();
+        }
+        assert_eq!(count_uel(&out), 2, "Drop fazladan UEL yazdı");
+    }
+
+    /// `begin_job` hiç çağrılmadıysa `Drop` hiçbir şey yazmamalı: yazıcı QPDL
+    /// diline hiç girmemiştir, yalnız başına bir UEL göndermenin anlamı yok.
+    #[test]
+    fn test_drop_writes_nothing_when_job_never_started() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let _w = SplStreamWriter::new(&mut out);
+        }
+        assert!(out.is_empty(), "iş başlamadan çıktı üretildi: {:?}", out);
+    }
+
+    /// D-02 regresyonu: QPDL sayfa başlığındaki 16-bit genişlik/yükseklik
+    /// alanları büyük-endian olarak, kırpılmadan yazılmalı.
+    ///
+    /// Alanlar `u16` olduğu için `u32`'den sessiz bir daralma artık tip
+    /// düzeyinde imkânsız; bu test kodlamanın kendisini sabitler.
+    #[test]
+    fn test_begin_page_encodes_16bit_dimensions() {
+        let cfg = PageConfig {
+            width_pixels: u16::MAX,
+            height_pixels: 0xABCD,
+            ..PageConfig::default()
+        };
+        let mut out: Vec<u8> = Vec::new();
+        SplStreamWriter::new(&mut out).begin_page(&cfg).unwrap();
+
+        assert_eq!(&out[0x5..0x7], &[0xFF, 0xFF], "genişlik kırpıldı");
+        assert_eq!(&out[0x7..0x9], &[0xAB, 0xCD], "yükseklik kırpıldı");
+        assert_eq!(out.len(), 17);
     }
 
     #[test]
@@ -769,7 +1155,7 @@ mod tests {
     fn test_algo0x11_roundtrip_real_band0() {
         use crate::raster::CupsRasterReader;
         use std::fs::File;
-        use std::io::{BufReader, Read};
+        use std::io::BufReader;
 
         let path = "target/test_output/test.raster";
         let file = match File::open(path) {
@@ -793,7 +1179,6 @@ mod tests {
         let bytes_to_copy = cups_line_bytes.min(band_width_bytes - margin_bytes);
         let band_height = 128usize;
 
-        let stream = reader.stream_mut();
         let mut line_buffer = vec![0u8; cups_line_bytes];
         let mut band_data = vec![0u8; band_width_bytes * band_height];
         let mut found_band = None;
@@ -806,7 +1191,7 @@ mod tests {
             }
             let mut lines_read = 0;
             for y in 0..band_height {
-                if stream.read_exact(&mut line_buffer).is_err() {
+                if reader.read_line(&mut line_buffer).is_err() {
                     break;
                 }
                 lines_read += 1;

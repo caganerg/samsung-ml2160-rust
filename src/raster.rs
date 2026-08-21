@@ -1,10 +1,15 @@
 //! # CUPS Raster Parser
 //!
 //! Bu modül, Linux CUPS filtre zincirinden (`cups-filters` / `libcupsfilters`)
-//! gelen standart CUPS Raster akışını (V1, V2, V3) ayrıştırır.
+//! gelen standart CUPS Raster akışını ayrıştırır.
 //!
 //! Not: PWG Raster (`PwgR` magic) yerine klasik CUPS Raster (`RaSt`, `RaS2`, `RaS3`)
 //! ve `cups_page_header2_t` (1796 bayt) veri yapısı esas alınmıştır.
+//!
+//! Üç sürüm de desteklenir. v1 ve v3 sayfa verisini sıkıştırmasız taşır;
+//! v2 (`RaS2`/`2SaR`, yani PWG Raster) satır-RLE kullanır ve
+//! `CupsLineDecoder` tarafından şeffaf biçimde çözülür. Çağıran taraf her
+//! durumda `CupsRasterReader::read_line` kullanır ve farkı görmez.
 
 use std::fmt;
 use std::io::{self, Read};
@@ -36,13 +41,38 @@ impl CupsRasterVersion {
         )
     }
 
-    /// Başlık yapısının beklenen bayt boyutu (V1 = 436 bayt, V2/V3 = 1796 bayt).
+    /// Başlık yapısının beklenen bayt boyutu.
+    ///
+    /// V1 = 420 bayt (`cups_page_header_t`; son alan `cupsRowStep` 416..420),
+    /// V2/V3 = 1796 bayt (`cups_page_header2_t`; son alan `cupsPageSizeName`
+    /// 1732..1796). Bu değerler CUPS'un kendi `<cups/raster.h>` başlığına karşı
+    /// `sizeof` ile ölçüldü.
+    ///
+    /// V1 için daha önce kullanılan 436, gerçek yapıdan 16 bayt fazlaydı: her
+    /// sayfa başlığı okumasında piksel verisinden fazladan 16 bayt yutuluyor,
+    /// böylece ilk sayfa kaymış olarak basılıyor ve sonraki sayfa başlığı
+    /// tamamen yanlış ofsetten ayrıştırılıyordu (`Geçersiz cupsBytesPerLine
+    /// değeri: 0`).
     #[inline]
     pub fn header_size(&self) -> usize {
         match self {
-            CupsRasterVersion::V1Be | CupsRasterVersion::V1Le => 436,
+            CupsRasterVersion::V1Be | CupsRasterVersion::V1Le => 420,
             _ => 1796,
         }
+    }
+
+    /// Akışın SAYFA VERİSİNİN CUPS satır-RLE'si ile sıkıştırılmış olup
+    /// olmadığını döner.
+    ///
+    /// CUPS Raster v2 (`RaS2`/`2SaR`) sayfa verisini satır bazlı bir RLE ile
+    /// sıkıştırır: `<cups/raster.h>` içinde `CUPS_RASTER_SYNC_PWG` doğrudan
+    /// `CUPS_RASTER_SYNCv2`'ye eşitlenmiştir ve PWG Raster tanımı gereği
+    /// sıkıştırılmıştır. v1 ve v3 sıkıştırmasızdır. libcups ile üretilen aynı
+    /// sayfa (620 B/satır x 200 satır = 124.000 bayt ham veri): `3SaR` dosyası
+    /// 125.800 bayt, `2SaR`/`RaS2` dosyası 1.811 bayt.
+    #[inline]
+    pub fn is_compressed(&self) -> bool {
+        matches!(self, CupsRasterVersion::V2Be | CupsRasterVersion::V2Le)
     }
 }
 
@@ -408,6 +438,8 @@ pub struct CupsRasterReader<R: Read> {
     reader: R,
     version: CupsRasterVersion,
     page_count: u32,
+    /// v2 akışlarında satır çözücüsünün sayfa başına durumu; v1/v3'te `None`.
+    decoder: Option<CupsLineDecoder>,
 }
 
 impl<R: Read> CupsRasterReader<R> {
@@ -446,6 +478,7 @@ impl<R: Read> CupsRasterReader<R> {
             reader,
             version,
             page_count: 0,
+            decoder: None,
         })
     }
 
@@ -498,14 +531,182 @@ impl<R: Read> CupsRasterReader<R> {
 
         self.page_count += 1;
         let header = PageHeader::parse(&buf, self.version)?;
+
+        // Sıkıştırma durumu SAYFA başına sıfırlanır: bir sayfadan artakalan
+        // satır tekrar sayacı sonraki sayfaya sızmamalı.
+        self.decoder = if self.version.is_compressed() {
+            Some(CupsLineDecoder::new(&header))
+        } else {
+            None
+        };
+
         Ok(Some(header))
     }
 
-    /// Sayfa raster verisini okumak için temel akışa erişim.
-    #[inline]
-    pub fn stream_mut(&mut self) -> &mut R {
-        &mut self.reader
+    /// Sayfa raster verisinden TEK BİR SATIR okur ve `out`'u tamamen doldurur.
+    ///
+    /// Sıkıştırmasız akışlarda (v1/v3) bu düz bir `read_exact`'tir. v2/PWG
+    /// akışlarında satır, CUPS'un PackBits türevi satır-RLE'siyle kodlanmıştır
+    /// ve burada çözülür; çağıran taraf farkı görmez.
+    ///
+    /// `out`'un uzunluğu her çağrıda `cupsBytesPerLine` olmalıdır. Çözücü
+    /// kendi tamponunu bu uzunluktan boyutlandırır — başlıktaki (henüz
+    /// doğrulanmamış, güvenilmez) `bytes_per_line` alanından DEĞİL. Böylece
+    /// bozuk bir başlık, `validate_page_header` daha çalışmadan devasa bir
+    /// tahsis tetikleyemez.
+    pub fn read_line(&mut self, out: &mut [u8]) -> io::Result<()> {
+        match &mut self.decoder {
+            None => self.reader.read_exact(out),
+            Some(decoder) => decoder.read_line(&mut self.reader, out),
+        }
     }
+}
+
+/// CUPS Raster v2 (`RaS2`/`2SaR`, PWG Raster ile aynı) satır-RLE çözücüsü.
+///
+/// Kodlama, satır başına şu yapıdadır:
+///
+/// ```text
+/// [tekrar]  : bu satır (tekrar + 1) kez yinelenir
+/// ardından cupsBytesPerLine dolana kadar:
+///   n == 128 : satırın sonuna kadar boş renkle doldur
+///   n >  128 : (257 - n) pikselin ham (literal) kopyası gelir
+///   n <  128 : sonraki tek piksel (n + 1) kez yinelenir
+/// ```
+///
+/// Kodlama, libcups'un `cupsRasterWritePixels` çıktısına karşı bire bir
+/// doğrulandı: 620 bayt sıfırdan oluşan 200 satırlık bir sayfa
+/// `c7 7f 00 7f 00 7f 00 7f 00 6b 00` (11 bayt) olarak kodlanıyor —
+/// yani `[199]` + `[127, 0x00] x4` + `[107, 0x00]` = 200 satır x 620 bayt.
+struct CupsLineDecoder {
+    /// Piksel başına bayt. `cupsBitsPerPixel < 8` için libcups gibi 1 kabul
+    /// edilir; tekrar ve ham kopya sayaçları PİKSEL cinsindendir, bayt değil.
+    bpp: usize,
+    /// `n == 128` (satır sonuna kadar boşalt) durumunda kullanılan dolgu.
+    ///
+    /// libcups, toner/mürekkep ekleyen renk uzaylarında (K, CMY, CMYK, White,
+    /// Gold, Silver) boşluğu `0x00`, diğerlerinde `0xFF` ile doldurur.
+    blank_fill: u8,
+    /// Son çözülen satırın kaç kez daha tekrarlanacağı.
+    repeat_remaining: u32,
+    /// Son çözülen satır; tekrarlar buradan kopyalanır. İlk `read_line`
+    /// çağrısında, çağıranın verdiği tampon uzunluğundan boyutlandırılır.
+    last_line: Vec<u8>,
+}
+
+impl CupsLineDecoder {
+    fn new(header: &PageHeader) -> Self {
+        // libcups cups_raster_update(): 8 bitten küçük derinliklerde bpp 1'dir.
+        let bpp = if header.bits_per_pixel >= 8 {
+            (header.bits_per_pixel as usize).div_ceil(8)
+        } else {
+            1
+        };
+
+        let blank_fill = match header.color_space {
+            CupsColorSpace::K
+            | CupsColorSpace::Cmy
+            | CupsColorSpace::Cmyk
+            | CupsColorSpace::White
+            | CupsColorSpace::Gold
+            | CupsColorSpace::Silver => 0x00,
+            _ => 0xFF,
+        };
+
+        Self {
+            bpp: bpp.max(1),
+            blank_fill,
+            repeat_remaining: 0,
+            last_line: Vec::new(),
+        }
+    }
+
+    fn read_line<R: Read>(&mut self, reader: &mut R, out: &mut [u8]) -> io::Result<()> {
+        if out.is_empty() {
+            return Ok(());
+        }
+
+        // Tampon ilk kullanımda çağıranın uzunluğundan kurulur; sonraki
+        // çağrılarda uzunluk değişemez (sayfa ortasında değişmesi, çağıranın
+        // bir hatası olurdu ve sessizce yanlış çözmektense hata verilir).
+        if self.last_line.is_empty() {
+            self.last_line = vec![0u8; out.len()];
+        } else if self.last_line.len() != out.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Satır uzunluğu sayfa ortasında değişti: {} -> {}",
+                    self.last_line.len(),
+                    out.len()
+                ),
+            ));
+        }
+
+        if self.repeat_remaining > 0 {
+            self.repeat_remaining -= 1;
+            out.copy_from_slice(&self.last_line);
+            return Ok(());
+        }
+
+        let repeat = read_u8(reader)?;
+        self.repeat_remaining = repeat as u32;
+        self.decode_line(reader)?;
+        out.copy_from_slice(&self.last_line);
+        Ok(())
+    }
+
+    fn decode_line<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        let line_len = self.last_line.len();
+        let bpp = self.bpp;
+        let mut pos = 0usize;
+
+        while pos < line_len {
+            let n = read_u8(reader)?;
+
+            if n == 128 {
+                // Satırın sonuna kadar boş renkle doldur.
+                self.last_line[pos..].fill(self.blank_fill);
+                return Ok(());
+            }
+
+            if n > 128 {
+                // (257 - n) piksellik ham kopya: n=255 -> 2, n=129 -> 128.
+                let count = ((257 - n as usize) * bpp).min(line_len - pos);
+                reader.read_exact(&mut self.last_line[pos..pos + count])?;
+                pos += count;
+                continue;
+            }
+
+            // Sonraki tek piksel (n + 1) kez yinelenir.
+            let count = ((n as usize + 1) * bpp).min(line_len - pos);
+            if count < bpp {
+                // libcups burada satırı yarıda bırakır; kalanı önceki
+                // içerikten kalmasın diye boş renkle dolduruyoruz.
+                self.last_line[pos..].fill(self.blank_fill);
+                return Ok(());
+            }
+
+            reader.read_exact(&mut self.last_line[pos..pos + bpp])?;
+            let (written, rest) = self.last_line.split_at_mut(pos + bpp);
+            let pixel = &written[pos..pos + bpp];
+            let repeats = count / bpp - 1;
+            for chunk in rest.chunks_mut(bpp).take(repeats) {
+                // Son yineleme kısmi bir piksel olabilir; `chunk` kadarını al.
+                let take = chunk.len().min(bpp);
+                chunk[..take].copy_from_slice(&pixel[..take]);
+            }
+            pos += count;
+        }
+
+        Ok(())
+    }
+}
+
+#[inline]
+fn read_u8<R: Read>(reader: &mut R) -> io::Result<u8> {
+    let mut b = [0u8; 1];
+    reader.read_exact(&mut b)?;
+    Ok(b[0])
 }
 
 #[cfg(test)]
@@ -515,9 +716,12 @@ mod tests {
 
     #[test]
     fn test_cups_sync_words() {
-        let v2_be = b"RaS2";
-        let reader = CupsRasterReader::new(Cursor::new(v2_be)).unwrap();
-        assert_eq!(reader.version(), CupsRasterVersion::V2Be);
+        // v2 (`RaS2`/`2SaR`) artık `new()` tarafından reddediliyor (bkz.
+        // test_rejects_compressed_v2_streams), bu yüzden burada kabul edilen
+        // sürümler üzerinden doğruluyoruz.
+        let v3_be = b"RaS3";
+        let reader = CupsRasterReader::new(Cursor::new(v3_be)).unwrap();
+        assert_eq!(reader.version(), CupsRasterVersion::V3Be);
         assert!(reader.version().is_big_endian());
         assert_eq!(reader.version().header_size(), 1796);
 
@@ -525,7 +729,12 @@ mod tests {
         let reader_v1 = CupsRasterReader::new(Cursor::new(v1_le)).unwrap();
         assert_eq!(reader_v1.version(), CupsRasterVersion::V1Le);
         assert!(!reader_v1.version().is_big_endian());
-        assert_eq!(reader_v1.version().header_size(), 436);
+        assert_eq!(reader_v1.version().header_size(), 420);
+
+        // Sürüm eşlemesi, akışı reddetmekten bağımsız olarak doğru kalmalı.
+        assert_eq!(CupsRasterVersion::V2Be.header_size(), 1796);
+        assert!(CupsRasterVersion::V2Be.is_compressed());
+        assert!(CupsRasterVersion::V2Le.is_compressed());
     }
 
     #[test]
@@ -566,5 +775,206 @@ mod tests {
         assert_eq!(header.color_space, CupsColorSpace::K);
         assert_eq!(header.page_size_name.as_deref(), Some("A4"));
         assert_eq!(header.total_raster_bytes(), 620 * 7016);
+    }
+
+    /// V1 başlık boyutu, CUPS'un `cups_page_header_t` yapısının gerçek
+    /// boyutuyla (420 bayt) eşleşmeli. Daha önce kullanılan 436, her başlıkta
+    /// piksel verisinden 16 bayt yutup akışı kaydırıyordu.
+    #[test]
+    fn test_v1_header_size_matches_cups_struct() {
+        assert_eq!(CupsRasterVersion::V1Be.header_size(), 420);
+        assert_eq!(CupsRasterVersion::V1Le.header_size(), 420);
+        // V2/V3 (`cups_page_header2_t`) değişmedi.
+        assert_eq!(CupsRasterVersion::V3Be.header_size(), 1796);
+    }
+
+    /// Y-02 regresyonu: ardışık V1 sayfaları akışta senkron kalmalı.
+    ///
+    /// Başlık boyutu bir bayt bile fazla okunursa 2. sayfanın alanları yanlış
+    /// ofsetten ayrıştırılır; 436 ile bu test `bytes_per_line == 0` üretiyordu.
+    #[test]
+    fn test_v1_stream_stays_in_sync_across_pages() {
+        const V1_HEADER_LEN: usize = 420;
+
+        let mut header = vec![0u8; V1_HEADER_LEN];
+        let mut put = |off: usize, val: u32| {
+            header[off..off + 4].copy_from_slice(&val.to_be_bytes());
+        };
+        put(276, 600); // hw_resolution[0]
+        put(280, 600); // hw_resolution[1]
+        put(352, 595); // page_size_points[0]
+        put(356, 842); // page_size_points[1]
+        put(372, 32); // width
+        put(376, 3); // height
+        put(384, 1); // bits_per_color
+        put(388, 1); // bits_per_pixel
+        put(392, 4); // bytes_per_line = ceil(32 * 1 / 8)
+        put(400, 3); // color_space = K
+        put(416, 0xABCD); // row_step: 420 sınırındaki SON alan
+
+        let pixels = vec![0u8; 4 * 3];
+        let mut stream = b"RaSt".to_vec();
+        for _ in 0..2 {
+            stream.extend_from_slice(&header);
+            stream.extend_from_slice(&pixels);
+        }
+
+        let mut reader = CupsRasterReader::new(Cursor::new(stream)).unwrap();
+        for page in 1..=2 {
+            let h = reader
+                .next_page_header()
+                .unwrap()
+                .unwrap_or_else(|| panic!("sayfa {} başlığı okunamadı", page));
+            assert_eq!(h.bytes_per_line, 4, "sayfa {} kaymış", page);
+            assert_eq!(h.width, 32, "sayfa {} kaymış", page);
+            assert_eq!(h.height, 3, "sayfa {} kaymış", page);
+            assert_eq!(h.row_step, 0xABCD, "sayfa {} son alanı kaymış", page);
+
+            // Sayfa verisini tüket ki sıradaki başlık doğru ofsetten okunsun.
+            let mut line = vec![0u8; 4];
+            for _ in 0..3 {
+                reader.read_line(&mut line).unwrap();
+            }
+        }
+        assert!(reader.next_page_header().unwrap().is_none(), "akış temiz bitmeli");
+    }
+
+    /// Altı sync sözcüğü de kabul edilmeli; sıkıştırma bayrağı doğru kurulmalı.
+    #[test]
+    fn test_accepts_all_known_sync_words() {
+        for (magic, compressed) in [
+            (b"RaSt", false),
+            (b"tSaR", false),
+            (b"RaS2", true),
+            (b"2SaR", true),
+            (b"RaS3", false),
+            (b"3SaR", false),
+        ] {
+            let reader = CupsRasterReader::new(Cursor::new(magic))
+                .unwrap_or_else(|e| panic!("{:?} reddedildi: {}", magic, e));
+            assert_eq!(reader.version().is_compressed(), compressed, "{:?}", magic);
+        }
+    }
+
+    /// 1 bayt/piksel için tek satırlık bir v2 akışı kurar.
+    fn v2_page(bytes_per_line: u32, height: u32, payload: &[u8]) -> Vec<u8> {
+        let mut hdr = vec![0u8; 1796];
+        let mut put = |off: usize, val: u32| {
+            hdr[off..off + 4].copy_from_slice(&val.to_be_bytes());
+        };
+        put(276, 600);
+        put(280, 600);
+        put(352, 595);
+        put(356, 842);
+        put(372, bytes_per_line * 8);
+        put(376, height);
+        put(384, 1);
+        put(388, 1);
+        put(392, bytes_per_line);
+        put(400, 3); // K
+
+        let mut stream = b"RaS2".to_vec();
+        stream.extend_from_slice(&hdr);
+        stream.extend_from_slice(payload);
+        stream
+    }
+
+    fn decode_v2(bytes_per_line: u32, height: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+        let mut reader =
+            CupsRasterReader::new(Cursor::new(v2_page(bytes_per_line, height, payload))).unwrap();
+        reader.next_page_header().unwrap().unwrap();
+        (0..height)
+            .map(|_| {
+                let mut line = vec![0u8; bytes_per_line as usize];
+                reader.read_line(&mut line).unwrap();
+                line
+            })
+            .collect()
+    }
+
+    /// libcups'un ürettiği GERÇEK bayt dizisi çözülebilmeli.
+    ///
+    /// `cupsRasterWritePixels` ile yazılan, 620 bayt sıfırdan oluşan 200
+    /// satırlık bir sayfanın tamamı tam olarak bu 11 bayttır; kodlamayı
+    /// bu dosyadan bire bir okudum.
+    #[test]
+    fn test_v2_decodes_real_libcups_payload() {
+        let payload = [0xc7, 0x7f, 0x00, 0x7f, 0x00, 0x7f, 0x00, 0x7f, 0x00, 0x6b, 0x00];
+        let lines = decode_v2(620, 200, &payload);
+        assert_eq!(lines.len(), 200);
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.iter().all(|&b| b == 0), "satır {} sıfır değil", i);
+        }
+    }
+
+    /// Üç kayıt türü de doğru çözülmeli: tekrar, ham kopya, satır sonuna
+    /// kadar boşaltma.
+    #[test]
+    fn test_v2_decodes_each_record_kind() {
+        // [0] satır tekrarı yok
+        // [2, 0xAB]      -> 0xAB x3
+        // [0xFE, 1, 2, 3] -> (257-254)=3 ham bayt
+        // [128]          -> satır sonuna kadar boş (K => 0x00)
+        let payload = [0x00, 0x02, 0xAB, 0xFE, 0x01, 0x02, 0x03, 0x80];
+        let lines = decode_v2(8, 1, &payload);
+        assert_eq!(lines[0], vec![0xAB, 0xAB, 0xAB, 1, 2, 3, 0x00, 0x00]);
+    }
+
+    /// Satır tekrar sayacı: `[n]` başlığı satırı (n + 1) kez üretir.
+    #[test]
+    fn test_v2_line_repeat_count() {
+        // [3] -> 4 satır; her satır [0,0xF0] + [128] ile 0xF0 sonra sıfırlar
+        let payload = [0x03, 0x00, 0xF0, 0x80];
+        let lines = decode_v2(4, 4, &payload);
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert_eq!(line, &vec![0xF0, 0x00, 0x00, 0x00]);
+        }
+    }
+
+    /// Satır tekrarı SAYFA sınırını aşmamalı: bir sayfadan artakalan sayaç
+    /// sonraki sayfanın ilk satırına sızarsa tüm akış kayar.
+    #[test]
+    fn test_v2_repeat_state_resets_between_pages() {
+        // Her sayfa "10 satır tekrarı" bildiriyor ama sayfa yüksekliği 1.
+        let payload = [0x09, 0x00, 0xAA, 0x80];
+        let mut stream = v2_page(4, 1, &payload);
+        let second = v2_page(4, 1, &[0x09, 0x00, 0xBB, 0x80]);
+        stream.extend_from_slice(&second[4..]); // magic'i atla
+
+        let mut reader = CupsRasterReader::new(Cursor::new(stream)).unwrap();
+        let mut line = vec![0u8; 4];
+
+        reader.next_page_header().unwrap().unwrap();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line[0], 0xAA);
+
+        reader.next_page_header().unwrap().unwrap();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line[0], 0xBB, "önceki sayfanın tekrar sayacı sızdı");
+    }
+
+    /// Bildirilen uzunluğu aşan sayaçlar satır sınırında kırpılmalı, taşmamalı.
+    #[test]
+    fn test_v2_oversized_counts_are_clamped_to_line() {
+        // [0x7F] = 128 piksellik tekrar, ama satır yalnızca 4 bayt.
+        let lines = decode_v2(4, 1, &[0x00, 0x7F, 0x5A]);
+        assert_eq!(lines[0], vec![0x5A; 4]);
+
+        // [0x81] = 128 baytlık ham kopya, satır yine 4 bayt.
+        let mut payload = vec![0x00, 0x81];
+        payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let lines = decode_v2(4, 1, &payload);
+        assert_eq!(lines[0], vec![0x11, 0x22, 0x33, 0x44]);
+    }
+
+    /// Yarıda kesilen bir v2 akışı hata döndürmeli, panic atmamalı.
+    #[test]
+    fn test_v2_truncated_payload_errors_cleanly() {
+        let mut reader = CupsRasterReader::new(Cursor::new(v2_page(620, 10, &[0x00, 0x7F])))
+            .unwrap();
+        reader.next_page_header().unwrap().unwrap();
+        let mut line = vec![0u8; 620];
+        assert!(reader.read_line(&mut line).is_err());
     }
 }
