@@ -42,6 +42,25 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Güvenilmeyen bir değeri (ağdan/USB'den keşfedilen aygıt bilgisi, komut satırı
+# argümanları) ekrana basarken `echo -e` KULLANMA: ters bölü kaçışlarını
+# yorumladığı için, adına \e[2K\r gömen sahte bir aygıt onay ekranındaki satırı
+# silip yerine başka bir adres yazdırabilir; operatörün gördüğü URI ile gerçekte
+# kurulan URI ayrışır ve aşağıdaki y/N onayı anlamını yitirir. Bu yardımcı,
+# sabit metni %b (renk kaçışları yorumlansın diye), değeri ise %s ile basar.
+# Değer, basılmadan önce C0 kontrol karakterlerinden (ESC, CR, BS, LF…)
+# arındırılır: printf '%s' ters bölü kaçışlarını yorumlamaz, ama değerin İÇİNDE
+# zaten ham ESC baytı varsa onu olduğu gibi terminale geçirir ve satır yine
+# boyanabilir. Meşru bir URI/kuyruk adı bu baytları asla içermez.
+sanitize() {
+    printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177'
+}
+
+say() {
+    # $1: değerden önceki sabit metin, $2: güvenilmeyen değer, $3: sonraki sabit metin
+    printf '%b%s%b\n' "$1" "$(sanitize "$2")" "${3:-$NC}"
+}
+
 PRINTER_NAME_ARG="${1:-}"
 DEVICE_URI="${2:-}"
 
@@ -85,6 +104,31 @@ echo -e "${GREEN} -> Filter binary ready: $FILTER_BIN${NC}"
 
 # 3. Install the filter system-wide (requires root)
 echo -e "\n${YELLOW}[3/5] Installing filter binary: $FILTER_DEST (sudo may be required)${NC}"
+
+# `sudo install` bu ikiliyi root olarak sistem yoluna kopyalıyor. Depo dizini
+# başkalarınca yazılabilir bir yoldaysa (paylaşımlı mount, geniş izinli /srv),
+# derleme ile kopyalama arasında ikili değiştirilip root sahipli bir CUPS
+# filtresi olarak kurulabilir. Kopyalamadan önce kaynak zincirini doğrula.
+assert_not_writable_by_others() {
+    local path="$1" perms owner
+    perms="$(stat -c '%a' "$path")" || exit 1
+    owner="$(stat -c '%u' "$path")" || exit 1
+    if [[ "$owner" != "$EUID" && "$owner" != "0" ]]; then
+        echo -e "${RED}ERROR: $path is owned by uid $owner (neither you nor root).${NC}"
+        echo -e "${RED}Refusing to install a binary as root from a path you do not control.${NC}"
+        exit 1
+    fi
+    if (( 8#$perms & 8#022 )); then
+        echo -e "${RED}ERROR: $path is group- or world-writable (mode $perms).${NC}"
+        echo -e "${RED}Another user could swap the filter binary before it is installed as root.${NC}"
+        echo -e "${RED}Fix with: chmod go-w $path${NC}"
+        exit 1
+    fi
+}
+for p in "$SCRIPT_DIR" "$SCRIPT_DIR/target" "$SCRIPT_DIR/target/release" "$SCRIPT_DIR/$FILTER_BIN"; do
+    assert_not_writable_by_others "$p"
+done
+
 sudo install -m 755 -o root -g root "$SCRIPT_DIR/$FILTER_BIN" "$FILTER_DEST"
 echo -e "${GREEN} -> Filter installed: $FILTER_DEST${NC}"
 
@@ -112,11 +156,26 @@ if [[ -z "$DEVICE_URI" ]]; then
     mapfile -t FOUND_LINES < <(lpinfo -v 2>/dev/null | grep -E 'Samsung.*ML-?216[0-9]W?')
     if [[ ${#FOUND_LINES[@]} -gt 1 ]]; then
         echo -e "${YELLOW} WARNING: Multiple Samsung ML-216x printers found; using the first one:${NC}"
-        printf '   %s\n' "${FOUND_LINES[@]}"
+        for line in "${FOUND_LINES[@]}"; do
+            printf '   %s\n' "$(sanitize "$line")"
+        done
     fi
     DEVICE_URI="$(awk '{print $2}' <<< "${FOUND_LINES[0]:-}")"
     DEVICE_KIND="$(awk '{print $1}' <<< "${FOUND_LINES[0]:-}")"
     AUTO_DETECTED=1
+
+    # Meşru bir CUPS aygıt URI'si kontrol karakteri içermez; içeriyorsa bu,
+    # keşif çıktısına terminal kaçış dizisi gömme girişimidir (aşağıdaki y/N
+    # onayında operatöre gerçek adresten başka bir şey göstermek için).
+    # Böyle bir aygıtı ekrana basmakla yetinmeyip tümden reddet.
+    if [[ "$DEVICE_URI" == *[[:cntrl:]]* ]]; then
+        echo -e "${RED}ERROR: The auto-detected device URI contains control characters.${NC}"
+        echo -e "${RED}This is not a legitimate CUPS device URI — a device on your network or USB${NC}"
+        echo -e "${RED}bus is trying to forge the confirmation prompt below. Refusing to continue.${NC}"
+        echo -e "${RED}If you know the printer's real address, pass it explicitly:${NC}"
+        echo -e "${RED}  $0 <queue-name> socket://<printer-ip>:9100${NC}"
+        exit 1
+    fi
 fi
 
 if [[ -z "$DEVICE_URI" ]]; then
@@ -124,11 +183,11 @@ if [[ -z "$DEVICE_URI" ]]; then
     echo -e "${RED}Make sure the printer is connected via USB and powered on, or, for a network/Wi-Fi${NC}"
     echo -e "${RED}printer (e.g. ML-2165W) not found via mDNS/Bonjour, specify the device URI manually.${NC}"
     echo -e "${RED}These printers accept raw print data on the JetDirect port, so the usual form is:${NC}"
-    echo -e "${RED}  $0 ${PRINTER_NAME_ARG:-ML2165W_Rust} socket://<printer-ip>:9100${NC}"
+    say "${RED}  $0 " "${PRINTER_NAME_ARG:-ML2165W_Rust}" " socket://<printer-ip>:9100${NC}"
     echo -e "${RED}To list available devices: lpinfo -v${NC}"
     exit 1
 fi
-echo -e "${GREEN} -> Device found: $DEVICE_URI${NC}"
+say "${GREEN} -> Device found: " "$DEVICE_URI"
 
 # Device auto-discovery (mDNS/Bonjour/SNMP for network devices, and in principle
 # USB descriptor strings too) is unauthenticated: any device on the network —
@@ -149,10 +208,14 @@ if [[ "$AUTO_DETECTED" -eq 1 ]]; then
         echo -e "${YELLOW}    have your print jobs silently redirected to it. Verify the address above.${NC}"
     fi
     echo -e "${BOLD}Set up the print queue using this device? [y/N]${NC}"
-    read -r -p "> " CONFIRM || CONFIRM=""
+    # Onay, betiğin stdin'inden değil kontrol terminalinden okunur: betik bir
+    # boruya bağlıysa (`curl | bash`, CI) `read` betiğin kendi metnini tüketip
+    # onayı öngörülemez biçimde atlayabilir. /dev/tty yoksa read başarısız olur,
+    # CONFIRM boş kalır ve kurulum güvenli tarafa (iptale) düşer.
+    read -r -p "> " CONFIRM < /dev/tty || CONFIRM=""
     if [[ ! "$CONFIRM" =~ ^[Yy]([Ee][Ss])?$ ]]; then
         echo -e "${RED}Aborted. Re-run with an explicit device URI if you know the correct address:${NC}"
-        echo -e "${RED}  $0 ${PRINTER_NAME_ARG:-ML2165W_Rust} socket://<printer-ip>:9100${NC}"
+        say "${RED}  $0 " "${PRINTER_NAME_ARG:-ML2165W_Rust}" " socket://<printer-ip>:9100${NC}"
         exit 1
     fi
 fi
@@ -162,12 +225,12 @@ if [[ -n "$PRINTER_NAME_ARG" ]]; then
 else
     MODEL="$(grep -oE 'ML-?216[0-9]W?' <<< "$DEVICE_URI" | head -n1 | tr -d '-')"
     PRINTER_NAME="${MODEL:-ML2160}_Rust"
-    echo -e "${BLUE} -> No queue name given, using auto-detected name: $PRINTER_NAME${NC}"
+    say "${BLUE} -> No queue name given, using auto-detected name: " "$PRINTER_NAME"
 fi
 
 sudo lpadmin -p "$PRINTER_NAME" -E -v "$DEVICE_URI" -P "$PPD_SRC"
-echo -e "${GREEN} -> Queue ready: $PRINTER_NAME${NC}"
+say "${GREEN} -> Queue ready: " "$PRINTER_NAME"
 
 echo -e "\n${BOLD}${GREEN}Installation complete.${NC}"
 lpstat -p "$PRINTER_NAME" 2>/dev/null || true
-echo -e "\nTo send a test print: ${BOLD}lp -d $PRINTER_NAME <file.pdf>${NC}"
+say "\nTo send a test print: ${BOLD}lp -d " "$PRINTER_NAME" " <file.pdf>${NC}"

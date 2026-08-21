@@ -20,7 +20,25 @@ TARGET_BIN="target/release/rastertospl-rust"
 TEMP_DIR="target/test_output"
 mkdir -p "$TEMP_DIR"
 
-PDF_INPUT="${1:-$TEMP_DIR/sample_test.pdf}"
+# Girdi PDF'i: bir argüman verildiyse var olan bir dosya olmak ZORUNDADIR.
+# Argümanı doğrudan gs'in -sOutputFile'ına vermek, "%pipe%<komut>" biçimli bir
+# değerle Ghostscript'e rastgele kabuk komutu çalıştırtabiliyor (-dSAFER bu
+# yolu kapatmıyor), bu yüzden örnek PDF her zaman betiğin kendi belirlediği
+# sabit yola üretilir.
+PDF_ARG="${1:-}"
+if [[ -n "$PDF_ARG" ]]; then
+    if [[ ! -f "$PDF_ARG" ]]; then
+        # Argümanı `echo -e` ile basma: ters bölü kaçışlarını yorumlar.
+        printf '%b%s%b\n' "${RED}HATA: Girdi PDF dosyası bulunamadı: " \
+            "$(printf '%s' "$PDF_ARG" | LC_ALL=C tr -d '\000-\037\177')" "$NC"
+        echo -e "${RED}Argüman olarak var olan bir PDF verin ya da hiç argüman vermeyin${NC}"
+        echo -e "${RED}(bu durumda örnek bir PDF otomatik üretilir).${NC}"
+        exit 1
+    fi
+    PDF_INPUT="$PDF_ARG"
+else
+    PDF_INPUT="$TEMP_DIR/sample_test.pdf"
+fi
 RASTER_FILE="$TEMP_DIR/test.raster"
 SPL_OUTPUT="$TEMP_DIR/output.spl"
 
@@ -31,7 +49,7 @@ echo -e "${BOLD}${BLUE}======================================================${N
 # 1. Girdi PDF Kontrolü (Yoksa Ghostscript ile otomatik örnek PDF üret)
 if [ ! -f "$PDF_INPUT" ]; then
     echo -e "${YELLOW}[1/5] Girdi PDF dosyası belirtilmedi. Örnek PDF üretiliyor...${NC}"
-    gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH \
+    gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH -dSAFER \
        -sOutputFile="$PDF_INPUT" -c "
         /Helvetica-Bold findfont 24 scalefont setfont
         50 750 moveto (Samsung ML-2160 Rust CUPS Driver Test) show
@@ -59,7 +77,14 @@ echo -e "${GREEN} -> Filtre ikili dosyası hazır: $TARGET_BIN${NC}"
 # 3. cupsfilter ile PDF'i CUPS Raster'a Çevir
 echo -e "\n${YELLOW}[3/5] cupsfilter ile Samsung ML-2160 CUPS Raster akışı üretiliyor...${NC}"
 cupsfilter -p "$PPD_FILE" -m application/vnd.cups-raster "$PDF_INPUT" > "$RASTER_FILE" 2>/dev/null || \
-cupsfilter -p "$PPD_FILE" "$PDF_INPUT" > "$RASTER_FILE" 2>/dev/null
+cupsfilter -p "$PPD_FILE" "$PDF_INPUT" > "$RASTER_FILE"
+
+# cupsfilter kısmi başarısızlıkta 0 ile çıkıp boş/kırpık dosya bırakabiliyor;
+# boş bir raster ile devam etmek testi anlamsız biçimde "başarılı" gösterir.
+if [[ ! -s "$RASTER_FILE" ]]; then
+    echo -e "${RED}HATA: cupsfilter boş bir raster dosyası üretti: $RASTER_FILE${NC}"
+    exit 1
+fi
 
 RASTER_SIZE=$(stat -c%s "$RASTER_FILE" 2>/dev/null || stat -f%z "$RASTER_FILE")
 echo -e "${GREEN} -> CUPS Raster dosyası üretildi ($RASTER_SIZE bayt): $RASTER_FILE${NC}"
@@ -75,10 +100,10 @@ echo -e "${GREEN} -> SPL dosyası üretildi ($SPL_SIZE bayt): $SPL_OUTPUT${NC}"
 # 5. SPL Çıktı Dosyasının Başlıklarını ve Bayt Yapısını Doğrula
 echo -e "\n${YELLOW}[5/5] Üretilen SPL dosyasının başlık baytları doğrulanıyor...${NC}"
 
-python3 - <<EOF
+python3 - "$SPL_OUTPUT" <<'EOF'
 import sys
 
-spl_path = "$SPL_OUTPUT"
+spl_path = sys.argv[1]
 with open(spl_path, "rb") as f:
     data = f.read()
 
@@ -89,7 +114,7 @@ print(f"Toplam SPL Dosya Boyutu: {size} bayt")
 
 # 1. PJL Universal Exit Language Kontrolü
 if not data.startswith(b"\x1b%-12345X@PJL"):
-    errors.append("PJL UEL başlığı (\x1b%-12345X@PJL) bulunamadı!")
+    errors.append("PJL UEL başlığı (\\x1b%-12345X@PJL) bulunamadı!")
 else:
     print(" [OK] 1. PJL UEL Başlığı Doğrulandı.")
 
