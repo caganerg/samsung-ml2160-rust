@@ -43,6 +43,15 @@
 *% "1200x600dpi" gerçek bir QPDL modudur: bu motor ailesinde 1200 DPI, dikeyde
 *% 600 satır + yatayda daha hızlı lazer modülasyonu ile elde edilir. OpenPrinting
 *% SpliX de aynı seçeneği ml2010/ml2015/ml1640/ml2510/ml2525 PPD'lerinde sunar.
+*%
+*% DİKKAT: 300x300 DPI, QPDL'de şerit (band) yüksekliğini 128'den 64'e düşürür
+*% (SpliX compress.cpp: xResolution==300 && yResolution==300 -> bandHeight /= 2).
+*% Filtre bunu src/main.rs `band_height_for` içinde uyguluyor. Buraya yeni bir
+*% çözünürlük eklenirse o kuralın hâlâ geçerli olduğu doğrulanmalı;
+*% test_band_height_matches_splix_rule_for_every_ppd_resolution bu PPD'yi
+*% okuyarak her seçeneği denetliyor.
+*% Not: SpliX'in kendi ml2160.ppd/ml2165.ppd dosyaları yalnızca 600dpi ve
+*% 1200dpi sunar; 300dpi ve 1200x600dpi bu PPD'ye özgüdür.
 *% ============================================================================
 *OpenUI *Resolution/Resolution: PickOne
 *OrderDependency: 10 AnySetup *Resolution
@@ -69,7 +78,7 @@
 *PageSize Env10/No. 10 Envelope: "<</PageSize[297 684]/ImagingBBox null>>setpagedevice"
 *PageSize EnvDL/DL Envelope: "<</PageSize[312 624]/ImagingBBox null>>setpagedevice"
 *PageSize EnvC5/C5 Envelope: "<</PageSize[459 649]/ImagingBBox null>>setpagedevice"
-*PageSize Folio/Folio: "<</PageSize[612 936]/ImagingBBox null>>setpagedevice"
+*PageSize Folio/Folio: "<</PageSize[595 935]/ImagingBBox null>>setpagedevice"
 *CloseUI: *PageSize
 
 *OpenUI *PageRegion/PageRegion: PickOne
@@ -85,7 +94,7 @@
 *PageRegion Env10/No. 10 Envelope: "<</PageSize[297 684]/ImagingBBox null>>setpagedevice"
 *PageRegion EnvDL/DL Envelope: "<</PageSize[312 624]/ImagingBBox null>>setpagedevice"
 *PageRegion EnvC5/C5 Envelope: "<</PageSize[459 649]/ImagingBBox null>>setpagedevice"
-*PageRegion Folio/Folio: "<</PageSize[612 936]/ImagingBBox null>>setpagedevice"
+*PageRegion Folio/Folio: "<</PageSize[595 935]/ImagingBBox null>>setpagedevice"
 *CloseUI: *PageRegion
 
 *DefaultImageableArea: A4
@@ -99,7 +108,7 @@
 *ImageableArea Env10/No. 10 Envelope: "12 12 285 672"
 *ImageableArea EnvDL/DL Envelope: "12 12 300 612"
 *ImageableArea EnvC5/C5 Envelope: "12 12 447 637"
-*ImageableArea Folio/Folio: "12 12 600 924"
+*ImageableArea Folio/Folio: "12 12 583 923"
 
 *DefaultPaperDimension: A4
 *PaperDimension A4/A4: "595 842"
@@ -112,7 +121,7 @@
 *PaperDimension Env10/No. 10 Envelope: "297 684"
 *PaperDimension EnvDL/DL Envelope: "312 624"
 *PaperDimension EnvC5/C5 Envelope: "459 649"
-*PaperDimension Folio/Folio: "612 936"
+*PaperDimension Folio/Folio: "595 935"
 
 *% ============================================================================
 *% Paper Source (Tray)

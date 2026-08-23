@@ -63,7 +63,13 @@ impl SplPaperSize {
             (420, 595) | (595, 420) => SplPaperSize::A5,
             (297, 420) | (420, 297) => SplPaperSize::A6,
             (522, 756) | (756, 522) => SplPaperSize::Executive,
-            (612, 936) | (936, 612) => SplPaperSize::Folio,
+            // Folio (F4) = 210x330 mm = 595.28 x 935.43 pt -> 595 x 935.
+            // Daha önce burada 612 x 936 vardı, ki o Folio değil 8.5x13 inç,
+            // yani Adobe adlandırmasıyla FanFoldGermanLegal'dir — `cupstestppd`
+            // de PPD'yi tam bu gerekçeyle uyarıyordu ("Size "Folio" should be
+            // the Adobe standard name "FanFoldGermanLegal""). OpenPrinting
+            // SpliX'in ml2160.ppd/ml2165.ppd dosyaları da 595 x 935 diyor.
+            (595, 935) | (935, 595) => SplPaperSize::Folio,
             (516, 729) | (729, 516) => SplPaperSize::B5,
             (297, 684) | (684, 297) => SplPaperSize::Env10,
             (312, 624) | (624, 312) => SplPaperSize::Dl,
@@ -116,12 +122,32 @@ impl SplResolution {
 }
 
 /// Duplex Modu
+///
+/// SpliX `request.cpp` PPD'deki `Duplex` seçeneğini, PPD'nin
+/// `*QPDL ManualDuplex` özniteliğine bakarak OTOMATİK ya da ELLE duplex'e
+/// eşler:
+///
+/// ```c
+/// manualDuplex = ppd->get("ManualDuplex", "QPDL").isTrue();
+/// if (value == "DuplexNoTumble") _duplex = manualDuplex ? ManualLongEdge : LongEdge;
+/// else if (value == "DuplexTumble") _duplex = manualDuplex ? ManualShortEdge : ShortEdge;
+/// else _duplex = Simplex;
+/// ```
+///
+/// ML-2160 serisinin otomatik duplex donanımı YOKTUR: hem OpenPrinting
+/// SpliX'in `ml2160.ppd`/`ml2165.ppd` dosyaları hem de bu projenin PPD'si
+/// `*QPDL ManualDuplex: "On"` diyor. Dolayısıyla bu yazıcı ailesinde gerçekte
+/// yalnızca `Simplex` ve `Manual*` varyantları tetiklenir; `LongEdge` ve
+/// `ShortEdge` aynı QPDL v3 protokolünü konuşan otomatik duplekserli modeller
+/// için modelde tutuluyor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplDuplex {
     #[default]
     Simplex,
     LongEdge,
     ShortEdge,
+    ManualLongEdge,
+    ManualShortEdge,
 }
 
 /// Şerit Sıkıştırma Algoritması
@@ -174,6 +200,14 @@ pub struct PageConfig {
     /// Dikey (Y) çözünürlük — QPDL sayfa başlığında `header[0x1]`.
     pub resolution_y: SplResolution,
     pub duplex: SplDuplex,
+    /// Bu sayfanın iş içindeki 1 TABANLI sırası.
+    ///
+    /// Yalnızca `tumble` baytını (`header[0xC]`) üretmek için gerekli: SpliX
+    /// bunu `page->pageNr() % 2` ile hesaplar ve `pageNr` 1'den başlar
+    /// (document.cpp `_currentPage = 1`). 1 tabanlı olması sözleşmenin
+    /// parçasıdır — 0 tabanlı bir sayaç pariteyi ters çevirir ve elle duplex
+    /// baskıda sayfaların yanlış yüze gelmesine yol açar.
+    pub page_number: u32,
     pub copies: u16,
     /// QPDL sayfa başlığındaki genişlik alanı 16-bit'tir; tip de öyle.
     ///
@@ -198,6 +232,7 @@ impl Default for PageConfig {
             resolution_x: SplResolution::Dpi600,
             resolution_y: SplResolution::Dpi600,
             duplex: SplDuplex::Simplex,
+            page_number: 1,
             copies: 1,
             width_pixels: 4768,
             height_pixels: 6816,
@@ -652,6 +687,9 @@ impl<W: Write> SplStreamWriter<W> {
 
         // Gerçek SpliX (printer.cpp sendPJLHeader) duplex durumuna göre
         // DUPLEX=ON/OFF ve (açıksa) BINDING=LONGEDGE/SHORTEDGE gönderir.
+        // SpliX printer.cpp sendPJLHeader; ELLE duplex `ON` değil `MANUAL`
+        // gönderir ve bu ayrım ML-2160 ailesi için önemlidir, çünkü bu
+        // modellerde duplex her zaman elledir (bkz. SplDuplex).
         match config.duplex {
             SplDuplex::Simplex => {
                 pjl.extend_from_slice(b"@PJL SET DUPLEX=OFF\n");
@@ -662,6 +700,14 @@ impl<W: Write> SplStreamWriter<W> {
             }
             SplDuplex::ShortEdge => {
                 pjl.extend_from_slice(b"@PJL SET DUPLEX=ON\n");
+                pjl.extend_from_slice(b"@PJL SET BINDING=SHORTEDGE\n");
+            }
+            SplDuplex::ManualLongEdge => {
+                pjl.extend_from_slice(b"@PJL SET DUPLEX=MANUAL\n");
+                pjl.extend_from_slice(b"@PJL SET BINDING=LONGEDGE\n");
+            }
+            SplDuplex::ManualShortEdge => {
+                pjl.extend_from_slice(b"@PJL SET DUPLEX=MANUAL\n");
                 pjl.extend_from_slice(b"@PJL SET BINDING=SHORTEDGE\n");
             }
         }
@@ -695,11 +741,29 @@ impl<W: Write> SplStreamWriter<W> {
         header[0x7..0x9].copy_from_slice(&config.height_pixels.to_be_bytes());
         header[0x9] = config.paper_source as u8; // Auto = 1
         header[0xA] = 0x00; // unknownByte1
+        // SpliX qpdl.cpp renderPage, duplex/tumble baytları:
+        //
+        //   Simplex         : duplex = 1, tumble = 0
+        //   LongEdge        : duplex = 1, tumble = pageNr % 2
+        //   ShortEdge       : duplex = 0, tumble = pageNr % 2
+        //   ManualLongEdge  : duplex = 0, tumble = pageNr % 2
+        //   ManualShortEdge : duplex = 0, tumble = pageNr % 2
+        //
+        // `duplex` baytı sezgiye aykırıdır: Simplex'te 1, çift taraflı elle
+        // baskıda 0'dır. Bu değer eskiden doğru üretiliyordu, ama `tumble`
+        // koşulsuz 0 yazılıyordu; oysa SpliX'te SAYFA NUMARASININ PARİTESİDİR
+        // ve `_currentPage` 1'den başlar (document.cpp: `_currentPage = 1`),
+        // yani tek numaralı sayfalarda 1, çift numaralılarda 0 olur.
         header[0xB] = match config.duplex {
-            SplDuplex::Simplex => 1,
-            _ => 0,
+            SplDuplex::Simplex | SplDuplex::LongEdge => 1,
+            SplDuplex::ShortEdge
+            | SplDuplex::ManualLongEdge
+            | SplDuplex::ManualShortEdge => 0,
         };
-        header[0xC] = 0x00; // tumble = 0
+        header[0xC] = match config.duplex {
+            SplDuplex::Simplex => 0,
+            _ => (config.page_number % 2) as u8,
+        };
         header[0xD] = 0x00; // unknownByte2
         header[0xE] = config.qpdl_version; // 3
         header[0xF] = 0x01; // Colorplanes = 1 (Monokrom)

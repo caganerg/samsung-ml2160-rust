@@ -238,7 +238,21 @@ pub struct PageHeader {
     pub page_size_points: [u32; 2],    // [Width, Length] (1/72 inch points)
     pub separations: bool,
     pub tray_switch: bool,
-    pub turn_off: bool,
+    /// `Tumble` — CUPS'un çift taraflı baskıda BAĞLAMA KENARINI bildirdiği
+    /// alan: `false` = uzun kenar (DuplexNoTumble), `true` = kısa kenar
+    /// (DuplexTumble).
+    ///
+    /// Bu alan daha önce `turn_off` adıyla ayrıştırılıyordu; öyle bir CUPS
+    /// alanı yok. `<cups/raster.h>` içindeki `cups_page_header_t`'de
+    /// `cupsWidth`'ten hemen önce gelen (yani 368. bayttaki) alan `Tumble`'dır.
+    /// Ofset zaten doğruydu, yalnızca ad yanlıştı — ve alan kullanılmadığı için
+    /// fark edilmiyordu.
+    ///
+    /// DİKKAT: buradaki `tumble` ile QPDL sayfa başlığındaki `tumble` baytı
+    /// AYNI ŞEY DEĞİLDİR. Bu alan bağlama kenarını seçer; QPDL'deki bayt ise
+    /// sayfanın hangi yüze bastığını gösterir ve SpliX'te sayfa numarasının
+    /// paritesinden hesaplanır (bkz. spl.rs `begin_page`).
+    pub tumble: bool,
 
     pub width: u32,                    // cupsWidth (piksel)
     pub height: u32,                   // cupsHeight (piksel)
@@ -345,7 +359,7 @@ impl PageHeader {
         let page_sz_h = Self::read_u32(buf, 356, is_be);
         let separations = Self::read_u32(buf, 360, is_be) != 0;
         let tray_switch = Self::read_u32(buf, 364, is_be) != 0;
-        let turn_off = Self::read_u32(buf, 368, is_be) != 0;
+        let tumble = Self::read_u32(buf, 368, is_be) != 0;
 
         let width = Self::read_u32(buf, 372, is_be);
         let height = Self::read_u32(buf, 376, is_be);
@@ -406,7 +420,7 @@ impl PageHeader {
             page_size_points: [page_sz_w, page_sz_h],
             separations,
             tray_switch,
-            turn_off,
+            tumble,
             width,
             height,
             cups_media_type,
