@@ -26,11 +26,16 @@ lpinfo -v
 
 Copy the URI from the second column of the line matching your printer — a USB printer looks like `usb://Samsung/ML-2165W%20Series?serial=...`, an mDNS/Bonjour-discovered one like `dnssd://Samsung%20ML-2165W%20Series._pdl-datastream._tcp.local/`. A network/Wi-Fi model that isn't listed (e.g. an ML-2165W that mDNS hasn't found) accepts raw print data on the JetDirect port, so use `socket://<printer-ip>:9100` — these printers do not speak IPP.
 
-Then pass it, together with the queue name you want, to the install script:
+Then pass it, together with the queue name you want, to the install script — it treats every URI form the same way, so only the value below changes:
 
 ```sh
-./install.sh ML2160_Rust "socket://192.168.1.50:9100"
+DEVICE_URI="usb://Samsung/ML-2165W%20Series?serial=Z1A2B3C4D5"   # USB
+DEVICE_URI="socket://192.168.1.50:9100"                         # network / Wi-Fi (JetDirect)
+
+./install.sh ML2160_Rust "$DEVICE_URI"
 ```
+
+A `dnssd://...` URI copied straight out of `lpinfo -v` is passed exactly like the two above. Quote the URI in every case: `usb://` URIs contain `?` and `&`, which the shell would otherwise interpret.
 
 The script builds the project (`cargo build --release`), verifies that nothing outside your control can substitute the build artefacts, installs the filter binary into `/usr/lib/cups/filter/`, validates the PPD (`cupstestppd`), and registers the CUPS queue. It only asks for a `sudo` password on the steps that write to system files — **don't run the whole script with `sudo`**.
 
@@ -55,8 +60,10 @@ cargo build --release
 sudo install -m 755 -o root -g root \
     target/release/rastertospl-rust /usr/lib/cups/filter/rastertospl-rust
 cupstestppd ppd/samsung-ml2160.ppd
-sudo lpadmin -p ML2160_Rust -E -v "socket://192.168.1.50:9100" -P ppd/samsung-ml2160.ppd
+sudo lpadmin -p ML2160_Rust -E -v "$DEVICE_URI" -P ppd/samsung-ml2160.ppd
 ```
+
+`$DEVICE_URI` is the same URI you would have passed to `install.sh` — a `usb://`, `socket://` or `dnssd://` one, depending on the connection.
 
 Two details the script would otherwise handle for you:
 
