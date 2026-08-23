@@ -351,6 +351,83 @@ fn compute_page_height_lines(page_size_pt: u32, y_dpi: u32) -> u32 {
     (page_size_pt as f64 * y_dpi as f64 / 72.0).ceil() as u32
 }
 
+/// CUPS Raster sayfa başlığındaki duplex bilgisini QPDL duplex moduna çevirir.
+///
+/// SpliX `request.cpp` bu kararı PPD üzerinden verir:
+///
+/// ```c
+/// manualDuplex = ppd->get("ManualDuplex", "QPDL").isTrue();
+/// if (value == "DuplexNoTumble") _duplex = manualDuplex ? ManualLongEdge : LongEdge;
+/// else if (value == "DuplexTumble") _duplex = manualDuplex ? ManualShortEdge : ShortEdge;
+/// else _duplex = Simplex;
+/// ```
+///
+/// PPD seçeneği (`DuplexNoTumble`/`DuplexTumble`) bize CUPS raster başlığındaki
+/// `Duplex` + `Tumble` çifti olarak ulaşır: `Duplex=false` -> Simplex,
+/// `Duplex=true, Tumble=false` -> uzun kenar, `Duplex=true, Tumble=true` ->
+/// kısa kenar.
+///
+/// Bu projenin PPD'si de OpenPrinting SpliX'in `ml2160.ppd`/`ml2165.ppd`
+/// dosyaları gibi `*QPDL ManualDuplex: "On"` bildiriyor ve ML-2160 serisinin
+/// otomatik dupleks donanımı yok; dolayısıyla `manualDuplex` bu ailede her
+/// zaman doğrudur ve sonuç daima `Manual*` varyantlarından biridir.
+///
+/// UYARI: bu yol ŞU AN ERİŞİLEMEZ. Projenin PPD'sinde `*OpenUI *Duplex` bloğu
+/// bulunmadığı için CUPS raster başlığındaki `Duplex` hiçbir zaman set
+/// edilmiyor. Eşleme yine de doğru tutuluyor ki PPD'ye duplex seçeneği
+/// eklendiğinde protokol tarafı hazır olsun. Eklenmeden önce bilinmesi gereken
+/// iki eksik için `stream_page_bands`'in altındaki nota bakın.
+/// ELLE DUPLEX EKSİĞİ (2/2): elle duplex, işin iki geçişte basılmasını
+/// gerektirir — önce bir yüz, sonra operatör kağıdı ters çevirip yeniden
+/// yükledikten sonra diğer yüz. Bu filtre sayfaları akıştan geldikleri sırayla
+/// tek geçişte gönderiyor; sayfa sırasını geçişlere bölmüyor. PPD'ye bir
+/// `*OpenUI *Duplex` bloğu eklenecekse bu akışın da (ve yukarıdaki 1/2
+/// maddesinin) çözülmesi gerekir, aksi hâlde çift taraflı işler yanlış sırada
+/// basılır.
+fn duplex_mode(header: &PageHeader) -> SplDuplex {
+    if !header.duplex {
+        SplDuplex::Simplex
+    } else if header.tumble {
+        SplDuplex::ManualShortEdge
+    } else {
+        SplDuplex::ManualLongEdge
+    }
+}
+
+/// QPDL şerit (band) yüksekliğinin temel değeri, satır cinsinden.
+///
+/// SpliX bunu PPD'den okur (`*QPDL BandSize: "128"`); hem OpenPrinting SpliX'in
+/// `ml2160.ppd`/`ml2165.ppd` dosyaları hem de bu projenin PPD'si 128 diyor.
+pub const QPDL_BAND_HEIGHT: usize = 128;
+
+/// Bir sayfa için kullanılacak şerit yüksekliği.
+///
+/// SpliX `compress.cpp` `_compressBandedPage` (Algo 0x11 bu yola gider; bkz.
+/// aynı dosyadaki `compressPage` dağıtıcısı, 0x0D/0x0E/0x11 -> banded):
+///
+/// ```c
+/// bandHeight = request.printer()->bandHeight();   // PPD: *QPDL BandSize
+/// if (page->xResolution() == 300 && page->yResolution() == 300)
+///     bandHeight /= 2;
+/// ```
+///
+/// Yani 300x300 DPI'da şerit yüksekliği 128 değil 64'tür. Kural koşulsuzdur ve
+/// üç yeri birden etkiler: bant tamponunun boyutu (`bandWidthInB * bandHeight`),
+/// transpoze indeksleme (`band[x * bandHeight + y]`) ve şerit kaydına yazılan
+/// yükseklik alanı. Bu filtre daha önce her çözünürlükte 128 kullanıyordu;
+/// PPD'nin `300dpi` seçeneği seçildiğinde yazıcıya 64 satırlık şeritler
+/// beklerken 128'e göre transpoze edilmiş veri gönderiliyordu.
+///
+/// Not: asimetrik `1200x600dpi` modu bu kuralın DIŞINDA kalır — koşul iki
+/// eksenin de 300 olmasını istiyor — ve 128'de kalmaya devam eder.
+fn band_height_for(header: &PageHeader) -> usize {
+    if header.hw_resolution[0] == 300 && header.hw_resolution[1] == 300 {
+        QPDL_BAND_HEIGHT / 2
+    } else {
+        QPDL_BAND_HEIGHT
+    }
+}
+
 /// Tek bir baskı işinde işlenecek azami sayfa sayısı.
 ///
 /// Sayfa döngüsünün üst sınırı yoktu: akış ne kadar uzunsa o kadar sayfa
@@ -419,8 +496,8 @@ fn process_cups_raster_to_spl<W: Write>(
     let mut next_header = raster_reader.next_page_header()?;
 
     let job_duplex = match &next_header {
-        Some(h) if h.duplex => SplDuplex::LongEdge,
-        _ => SplDuplex::Simplex,
+        Some(h) => duplex_mode(h),
+        None => SplDuplex::Simplex,
     };
 
     // 2. Samsung ML-2160 serisi PJL Başlığı (@PJL ENTER LANGUAGE = QPDL)
@@ -538,17 +615,30 @@ fn process_cups_raster_to_spl<W: Write>(
                 header.page_size_points[0],
                 header.page_size_points[1],
             ),
+            // ELLE DUPLEX EKSİĞİ (1/2): SpliX qpdl.cpp renderPage, elle duplex
+            // modunda ön yüz geçişinde kağıt kaynağını değiştirir:
+            //
+            //   if (tumble && !lastPage) paperSource = 3; // Multi source
+            //
+            // Buradaki `lastPage` bilgisi AKIŞ HALİNDE üretilemiyor: CUPS
+            // Raster'da sayfa verisi tüketilmeden bir sonraki sayfa başlığı
+            // okunamaz, dolayısıyla sayfa başlığını yazarken bu sayfanın son
+            // sayfa olup olmadığı bilinmiyor. Doğru uygulamak sayfanın tüm
+            // bantlarını bellekte tamponlamayı gerektirir (en kötü durumda ~22
+            // MB), ki bu yol bugün zaten erişilemez (bkz. duplex_mode).
+            // Bu yüzden kaynak her zaman Auto bırakılıyor ve sapma burada
+            // kayıt altına alınıyor.
             paper_source: SplPaperSource::Auto,
             // Eksenler AYRI: QPDL `header[0x1]` dikey, `header[0x10]` yatay
             // çözünürlüğü taşır (bkz. spl.rs PageConfig). `1200x600dpi` bu
             // motor ailesinde gerçek bir moddur.
             resolution_x: SplResolution::from_dpi(header.hw_resolution[0]),
             resolution_y: SplResolution::from_dpi(header.hw_resolution[1]),
-            duplex: if header.duplex {
-                SplDuplex::LongEdge
-            } else {
-                SplDuplex::Simplex
-            },
+            duplex: duplex_mode(&header),
+            // `tumble` baytı sayfa numarasının paritesinden üretiliyor ve
+            // sayaç 1 tabanlı; `page_number` da öyle (yukarıda kullanımdan
+            // ÖNCE artırılıyor). Bkz. spl.rs PageConfig::page_number.
+            page_number,
             copies: sanitize_copies(header.num_copies),
             // SpliX qpdl.cpp renderPage: width = page->width() = pageWidth
             width_pixels: band_width_u16,
@@ -612,8 +702,7 @@ fn stream_page_bands<R: Read, W: Write>(
     let total_lines = header.height as usize;
     let bw_bytes = band_width_bytes as usize;
 
-    // SpliX spl2basic.defs: BandSize = 128
-    let band_height: usize = 128;
+    let band_height = band_height_for(header);
 
     // CUPS raster satır okuma tamponu
     let mut line_buffer = vec![0u8; cups_bytes_per_line];
@@ -801,6 +890,128 @@ mod tests {
             options: None,
             filename: None,
         }
+    }
+
+    /// İstenen geometri/duplex ile çok sayfalı, sıkıştırmasız (v3) bir CUPS
+    /// Raster akışı kurar. `v3_stream` sabit A4/600 DPI üretiyor; bu esnek
+    /// sürüm çözünürlük ve duplex bayraklarını değiştirebilmek için var.
+    struct RasterSpec {
+        res_x: u32,
+        res_y: u32,
+        page_pt: (u32, u32),
+        width_px: u32,
+        height: u32,
+        duplex: bool,
+        tumble: bool,
+        pages: usize,
+    }
+
+    impl RasterSpec {
+        /// A4, verilen çözünürlükte sayfa genişliğine tam oturan bir sayfa.
+        fn a4(res_x: u32, res_y: u32, height: u32) -> Self {
+            let width_px = compute_page_width_pixels(595, res_x);
+            Self {
+                res_x,
+                res_y,
+                page_pt: (595, 842),
+                width_px,
+                height,
+                duplex: false,
+                tumble: false,
+                pages: 1,
+            }
+        }
+
+        fn bytes_per_line(&self) -> u32 {
+            self.width_px.div_ceil(8)
+        }
+
+        fn build(&self) -> Vec<u8> {
+            let mut stream = b"RaS3".to_vec();
+            for _ in 0..self.pages {
+                let mut buf = vec![0u8; 1796];
+                let mut put = |off: usize, val: u32| {
+                    buf[off..off + 4].copy_from_slice(&val.to_be_bytes());
+                };
+                put(272, self.duplex as u32);
+                put(276, self.res_x);
+                put(280, self.res_y);
+                put(352, self.page_pt.0);
+                put(356, self.page_pt.1);
+                put(368, self.tumble as u32); // Tumble (cupsWidth'ten hemen önce)
+                put(372, self.width_px);
+                put(376, self.height);
+                put(384, 1); // bits_per_color
+                put(388, 1); // bits_per_pixel
+                put(392, self.bytes_per_line());
+                put(400, 3); // color_space = K
+                stream.extend_from_slice(&buf);
+                stream.extend_from_slice(&vec![
+                    0u8;
+                    (self.bytes_per_line() * self.height) as usize
+                ]);
+            }
+            stream
+        }
+    }
+
+    /// Üretilen SPL akışındaki tek bir şerit kaydının başlık alanları.
+    #[derive(Debug, PartialEq, Eq)]
+    struct BandRecord {
+        index: u8,
+        width_px: u16,
+        height_lines: u16,
+    }
+
+    /// Üretilen SPL akışındaki tek bir sayfa: 17 baytlık başlık + şeritleri.
+    #[derive(Debug)]
+    struct SplPage {
+        header: [u8; 17],
+        bands: Vec<BandRecord>,
+    }
+
+    /// SPL çıktısını gerçek kayıt yapısına göre ayrıştırır. Testlerin
+    /// varsayımlarını değil, tele yazılan baytları doğrulayabilmesi için.
+    fn parse_spl(out: &[u8]) -> Vec<SplPage> {
+        const QPDL_MARK: &[u8] = b"ENTER LANGUAGE = QPDL\n";
+        let start = out
+            .windows(QPDL_MARK.len())
+            .position(|w| w == QPDL_MARK)
+            .expect("QPDL diline geçiş satırı yok")
+            + QPDL_MARK.len();
+
+        let mut pages = Vec::new();
+        let mut pos = start;
+        while pos < out.len() && !out[pos..].starts_with(spl::PJL_END) {
+            assert_eq!(out[pos], 0x00, "sayfa başlığı imzası beklendi @ {}", pos);
+            let mut header = [0u8; 17];
+            header.copy_from_slice(&out[pos..pos + 17]);
+            pos += 17;
+
+            let mut bands = Vec::new();
+            while pos < out.len() && out[pos] == 0x0C {
+                let total = u32::from_be_bytes(out[pos + 7..pos + 11].try_into().unwrap()) as usize;
+                bands.push(BandRecord {
+                    index: out[pos + 1],
+                    width_px: u16::from_be_bytes(out[pos + 2..pos + 4].try_into().unwrap()),
+                    height_lines: u16::from_be_bytes(out[pos + 4..pos + 6].try_into().unwrap()),
+                });
+                // 11 baytlık kayıt başlığı + (alt başlık + payload + checksum)
+                pos += 11 + total;
+            }
+
+            assert_eq!(out[pos], 0x01, "sayfa sonu imzası beklendi @ {}", pos);
+            pos += 3;
+            pages.push(SplPage { header, bands });
+        }
+        pages
+    }
+
+    fn run_filter(stream: Vec<u8>) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(stream)), &mut out)
+            .expect("filtre geçerli akışı işleyemedi");
+        out
     }
 
     fn count_uel(stream: &[u8]) -> usize {
@@ -1300,5 +1511,259 @@ mod tests {
         over_bpl.width = 9_999_999;
         over_bpl.bytes_per_line = 9_999_999;
         assert!(validate_page_header(&over_bpl).is_err());
+    }
+
+    // ======================================================================
+    // Şerit yüksekliği: SpliX compress.cpp `_compressBandedPage`
+    //   if (xResolution == 300 && yResolution == 300) bandHeight /= 2;
+    // ======================================================================
+
+    #[test]
+    fn test_band_height_is_halved_only_at_300x300() {
+        let with = |x, y| {
+            let mut h = valid_header();
+            h.hw_resolution = [x, y];
+            band_height_for(&h)
+        };
+        assert_eq!(with(300, 300), 64, "300x300 DPI'da şerit yüksekliği 64 olmalı");
+        assert_eq!(with(600, 600), QPDL_BAND_HEIGHT);
+        assert_eq!(with(1200, 1200), QPDL_BAND_HEIGHT);
+        // Kural İKİ eksenin de 300 olmasını istiyor; asimetrik modlar 128'de kalır.
+        assert_eq!(with(1200, 600), QPDL_BAND_HEIGHT);
+        assert_eq!(with(300, 600), QPDL_BAND_HEIGHT);
+        assert_eq!(with(600, 300), QPDL_BAND_HEIGHT);
+    }
+
+    /// Uçtan uca: 300 DPI bir iş, tele GERÇEKTEN 64 satırlık şerit kayıtları
+    /// yazmalı. Regresyon değeri buradadır — `band_height_for` doğru olsa bile
+    /// çağrı yerinde kullanılmazsa bu test kırılır.
+    #[test]
+    fn test_300dpi_job_writes_64_line_band_records() {
+        let spec = RasterSpec::a4(300, 300, 200);
+        let pages = parse_spl(&run_filter(spec.build()));
+        assert_eq!(pages.len(), 1);
+        let bands = &pages[0].bands;
+        assert_eq!(bands.len(), 200_usize.div_ceil(64), "200 satır / 64 = 4 şerit");
+        for (i, b) in bands.iter().enumerate() {
+            assert_eq!(b.height_lines, 64, "şerit {} yüksekliği 64 olmalı", i);
+            assert_eq!(b.index, i as u8);
+        }
+    }
+
+    #[test]
+    fn test_600dpi_job_still_writes_128_line_band_records() {
+        let spec = RasterSpec::a4(600, 600, 200);
+        let pages = parse_spl(&run_filter(spec.build()));
+        let bands = &pages[0].bands;
+        assert_eq!(bands.len(), 200_usize.div_ceil(128), "200 satır / 128 = 2 şerit");
+        assert!(bands.iter().all(|b| b.height_lines == 128));
+    }
+
+    /// Asimetrik `1200x600dpi` modu 300 DPI kuralına takılmamalı.
+    #[test]
+    fn test_asymmetric_1200x600_keeps_128_line_bands() {
+        let spec = RasterSpec::a4(1200, 600, 200);
+        let pages = parse_spl(&run_filter(spec.build()));
+        assert!(pages[0].bands.iter().all(|b| b.height_lines == 128));
+    }
+
+    /// PPD'nin sunduğu HER çözünürlük için şerit yüksekliği SpliX kuralıyla
+    /// aynı olmalı. PPD'ye yeni bir çözünürlük eklenirse bu test onu kapsar.
+    #[test]
+    fn test_band_height_matches_splix_rule_for_every_ppd_resolution() {
+        let ppd = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı");
+
+        let mut checked = 0;
+        for line in ppd.lines() {
+            let Some(rest) = line.strip_prefix("*Resolution ") else {
+                continue;
+            };
+            let name = rest.split('/').next().unwrap_or("").trim_end_matches("dpi");
+            let (x, y) = match name.split_once('x') {
+                Some((a, b)) => (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap()),
+                None => {
+                    let v = name.parse::<u32>().unwrap();
+                    (v, v)
+                }
+            };
+            let expected = if x == 300 && y == 300 { 64 } else { 128 };
+            let mut h = valid_header();
+            h.hw_resolution = [x, y];
+            assert_eq!(
+                band_height_for(&h),
+                expected,
+                "PPD {}x{} DPI sunuyor; SpliX kuralına göre şerit yüksekliği {} olmalı",
+                x,
+                y,
+                expected
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "PPD'den çözünürlük okunamadı: {}", checked);
+    }
+
+    // ======================================================================
+    // Duplex / tumble: SpliX request.cpp (mod seçimi) + qpdl.cpp (baytlar)
+    // ======================================================================
+
+    #[test]
+    fn test_duplex_mode_maps_cups_duplex_and_tumble() {
+        let mode = |duplex, tumble| {
+            let mut h = valid_header();
+            h.duplex = duplex;
+            h.tumble = tumble;
+            duplex_mode(&h)
+        };
+        assert_eq!(mode(false, false), SplDuplex::Simplex);
+        assert_eq!(mode(false, true), SplDuplex::Simplex, "Duplex kapalıyken Tumble yok sayılır");
+        // ML-2160 ailesi `*QPDL ManualDuplex: "On"` bildirdiği için sonuç
+        // daima Manual* olmalı; otomatik LongEdge/ShortEdge bu ailede yanlış.
+        assert_eq!(mode(true, false), SplDuplex::ManualLongEdge);
+        assert_eq!(mode(true, true), SplDuplex::ManualShortEdge);
+    }
+
+    /// Tek taraflı işlerde tumble baytı her sayfada 0, duplex baytı 1 olmalı.
+    /// (SpliX: Simplex -> duplex = 1, tumble = 0.)
+    #[test]
+    fn test_simplex_pages_have_duplex_byte_one_and_no_tumble() {
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.pages = 3;
+        let pages = parse_spl(&run_filter(spec.build()));
+        assert_eq!(pages.len(), 3);
+        for (i, p) in pages.iter().enumerate() {
+            assert_eq!(p.header[0xB], 1, "sayfa {}: Simplex duplex baytı 1 olmalı", i + 1);
+            assert_eq!(p.header[0xC], 0, "sayfa {}: Simplex tumble baytı 0 olmalı", i + 1);
+        }
+    }
+
+    /// Elle duplex'te tumble, SAYFA NUMARASININ paritesidir ve sayaç 1'den
+    /// başlar: tek numaralı sayfalarda 1, çift numaralılarda 0.
+    /// Eski kod burada koşulsuz 0 yazıyordu.
+    #[test]
+    fn test_manual_duplex_tumble_alternates_from_page_one() {
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.duplex = true;
+        spec.pages = 4;
+        let pages = parse_spl(&run_filter(spec.build()));
+        assert_eq!(pages.len(), 4);
+        let tumbles: Vec<u8> = pages.iter().map(|p| p.header[0xC]).collect();
+        assert_eq!(tumbles, vec![1, 0, 1, 0], "tumble = pageNr % 2 (pageNr 1 tabanlı)");
+        for p in &pages {
+            assert_eq!(p.header[0xB], 0, "elle duplex'te duplex baytı 0 olmalı");
+        }
+    }
+
+    /// Elle duplex PJL'de `DUPLEX=ON` değil `DUPLEX=MANUAL` demeli
+    /// (SpliX printer.cpp sendPJLHeader).
+    #[test]
+    fn test_manual_duplex_job_sends_pjl_duplex_manual() {
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.duplex = true;
+        let out = run_filter(spec.build());
+        let pjl = String::from_utf8_lossy(&out[..out.len().min(512)]).into_owned();
+        assert!(pjl.contains("@PJL SET DUPLEX=MANUAL\n"), "PJL: {}", pjl);
+        assert!(pjl.contains("@PJL SET BINDING=LONGEDGE\n"), "PJL: {}", pjl);
+        assert!(!pjl.contains("@PJL SET DUPLEX=ON"), "elle duplex ON bildirmemeli: {}", pjl);
+    }
+
+    #[test]
+    fn test_short_edge_manual_duplex_sends_shortedge_binding() {
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.duplex = true;
+        spec.tumble = true;
+        let out = run_filter(spec.build());
+        let pjl = String::from_utf8_lossy(&out[..out.len().min(512)]).into_owned();
+        assert!(pjl.contains("@PJL SET DUPLEX=MANUAL\n"), "PJL: {}", pjl);
+        assert!(pjl.contains("@PJL SET BINDING=SHORTEDGE\n"), "PJL: {}", pjl);
+    }
+
+    /// CUPS raster başlığındaki `Tumble` alanı 368. baytta (cupsWidth'ten
+    /// hemen önce) okunmalı. Alan daha önce `turn_off` adıyla duruyordu ve
+    /// hiç kullanılmadığı için yanlış adlandırma fark edilmiyordu.
+    #[test]
+    fn test_tumble_is_parsed_from_offset_368() {
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.duplex = true;
+        spec.tumble = true;
+        let stream = spec.build();
+        let header = PageHeader::parse(&stream[4..4 + 1796], CupsRasterVersion::V3Be).unwrap();
+        assert!(header.tumble, "368. bayttaki Tumble alanı okunmadı");
+        assert!(header.duplex);
+    }
+
+    // ======================================================================
+    // Kağıt boyutu eşlemesi
+    // ======================================================================
+
+    /// PPD'nin sunduğu her kağıt boyutu, QPDL'nin doğru kağıt koduna
+    /// eşlenmeli. `from_dimensions_pt` tanımadığı ölçüde sessizce A4'e
+    /// düştüğü için, PPD ile tablo arasındaki her sapma sessiz bir yanlış
+    /// kağıt kodu demektir — bu test onu gürültülü hâle getirir.
+    #[test]
+    fn test_every_ppd_paper_size_maps_to_its_qpdl_code() {
+        use spl::SplPaperSize;
+
+        let ppd = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı");
+
+        let expected = |name: &str| -> SplPaperSize {
+            match name {
+                "A4" => SplPaperSize::A4,
+                "Letter" => SplPaperSize::Letter,
+                "Legal" => SplPaperSize::Legal,
+                "Executive" => SplPaperSize::Executive,
+                "A5" => SplPaperSize::A5,
+                "A6" => SplPaperSize::A6,
+                "B5" => SplPaperSize::B5,
+                "Env10" => SplPaperSize::Env10,
+                "EnvDL" => SplPaperSize::Dl,
+                "EnvC5" => SplPaperSize::C5,
+                "Folio" => SplPaperSize::Folio,
+                other => panic!("PPD'de tabloya eklenmemiş kağıt boyutu: {}", other),
+            }
+        };
+
+        let mut checked = 0;
+        for line in ppd.lines() {
+            let Some(rest) = line.strip_prefix("*PaperDimension ") else {
+                continue;
+            };
+            let (name, dims) = rest.split_once(':').expect("bozuk *PaperDimension satırı");
+            let name = name.split('/').next().unwrap().trim();
+            let dims = dims.trim().trim_matches('"');
+            let mut it = dims.split_whitespace();
+            let w: u32 = it.next().unwrap().parse().unwrap();
+            let h: u32 = it.next().unwrap().parse().unwrap();
+
+            assert_eq!(
+                SplPaperSize::from_dimensions_pt(w, h),
+                expected(name),
+                "PPD '{}' = {}x{} pt, ama from_dimensions_pt başka bir kod veriyor",
+                name,
+                w,
+                h
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 11, "PPD'den beklenen sayıda kağıt boyutu okunamadı");
+    }
+
+    /// Folio 210x330 mm'dir (595x935 pt). 612x936 pt olan 8.5x13 inç ölçüsü
+    /// Adobe adlandırmasında FanFoldGermanLegal'dir ve Folio değildir;
+    /// `cupstestppd` de PPD'yi tam bu gerekçeyle uyarıyordu.
+    #[test]
+    fn test_folio_is_f4_not_fanfold_german_legal() {
+        use spl::SplPaperSize;
+        assert_eq!(SplPaperSize::from_dimensions_pt(595, 935), SplPaperSize::Folio);
+        assert_eq!(SplPaperSize::from_dimensions_pt(935, 595), SplPaperSize::Folio);
+        // 8.5x13 inç artık Folio'ya eşlenmemeli; tanınmayan ölçü A4'e düşer.
+        assert_eq!(SplPaperSize::from_dimensions_pt(612, 936), SplPaperSize::A4);
     }
 }
