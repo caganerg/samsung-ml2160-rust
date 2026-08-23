@@ -13,6 +13,15 @@ use spl::{
 
 /// CUPS Filtre Argümanları
 /// Standart çağrı: `filter job-id user title num-copies options [filename]`
+///
+/// `num_copies` (argv[4]) ve `options` (argv[5]) KASITLI olarak okunmuyor;
+/// alanlar yalnızca teşhis ve konum doğruluğu için tutuluyor. Gerekçe: bu bir
+/// raster filtresidir ve zincirde kendisinden önce çalışan cups-filters aşaması
+/// (`gstoraster`/`pdftoraster`) PPD'yi zaten yorumlayıp seçilen medyayı,
+/// çözünürlüğü ve kopya sayısını CUPS Raster SAYFA BAŞLIĞINA yazar. Sayfa
+/// başlığı ile komut satırı çeliştiğinde bağlayıcı olan başlıktır — sayfa
+/// verisi ona göre üretilmiştir. Buradan seçenek okumak, üretilen veriyle
+/// çelişen bir başlık yazmak anlamına gelirdi.
 #[allow(dead_code)]
 struct CupsFilterArgs {
     pub job_id: Option<String>,
@@ -442,6 +451,54 @@ fn band_height_for(header: &PageHeader) -> usize {
 /// katı) ama sınırsız değil.
 const MAX_PAGES_PER_JOB: u32 = 5_000;
 
+/// Tek bir baskı işinde işlenebilecek azami HAM RASTER hacmi (bayt).
+///
+/// `MAX_PAGES_PER_JOB` tek başına yetersizdi, çünkü ÇÖZÜNÜRLÜK KÖRÜdür: bir
+/// sayfanın işlenme maliyeti sayfa sayısıyla değil, bayt sayısıyla ölçeklenir.
+/// Ölçülen değerler (bu makinede, release derlemesi):
+///
+/// * sıkıştırılabilir (sıfır dolu) A4 @600 DPI sayfa: ~225 MB/s
+/// * SIKIŞTIRILAMAZ gürültü: ~10,5 MB/s
+///
+/// Yani en kötü durum çözünürlükle birlikte büyüyordu: 5.000 sayfa @600 DPI
+/// ~20 GB ve ~32 dakika CPU iken, aynı 5.000 sayfa doğrulayıcının kabul ettiği
+/// en büyük ölçüde (~44,8 MB/sayfa) ~224 GB ve ~6 SAAT CPU ediyordu. Filtre
+/// CUPS kuyruğunu tek iş parçacığıyla işlediği için bu süre boyunca sıradaki
+/// tüm işler bekler.
+///
+/// 32 GiB, iki sınırın da anlamlı kalacağı şekilde seçildi:
+///
+/// * @600 DPI'da A4 sayfa 596 x 6816 = ~3,87 MB'dir; 5.000 sayfa ~20,3 GB eder,
+///   yani bütçenin ~%57 altında kalır. Sayfa sınırına kadar olan hiçbir normal
+///   çözünürlüklü iş bu kontrole TAKILMAZ — davranış değişmez.
+/// * En büyük kabul edilebilir sayfada (4096 B/satır x 24.000 satır = ~98 MB)
+///   bütçe ~349 sayfada devreye girer ve en kötü durum CPU'yu ~6 saatten
+///   ~52 dakikaya çeker.
+const MAX_JOB_RASTER_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+/// İşin şimdiye kadar işlediği ham raster hacmini günceller ve bütçeyi aşıp
+/// aşmadığını bildirir.
+///
+/// Toplama `saturating_add` ile yapılıyor: sayfa başına hacim
+/// `validate_page_header` sayesinde ~98 MB ile sınırlı ve sayfa sayısı 5.000
+/// ile, dolayısıyla `u64` taşması zaten imkânsız — ama sınırlar değişirse
+/// sessizce sarmak yerine bütçeyi aşmış sayılması doğru davranıştır.
+fn accumulate_job_raster_bytes(total: &mut u64, page_bytes: u64) -> io::Result<()> {
+    *total = total.saturating_add(page_bytes);
+    if *total > MAX_JOB_RASTER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "İş, ham raster hacmi sınırını aştı: {} bayttan fazlası işlenmiyor \
+                 (şu ana kadar {} bayt). Belge gerçekten bu kadar büyükse işi \
+                 parçalara bölün ya da daha düşük bir çözünürlük seçin.",
+                MAX_JOB_RASTER_BYTES, total
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Gerçekçi bir baskı işi için makul kabul edilen azami kopya sayısı.
 ///
 /// QPDL'nin kopya alanı 16-bit'tir (teorik üst sınır 65535), ama hiçbir
@@ -510,6 +567,7 @@ fn process_cups_raster_to_spl<W: Write>(
     spl_writer.begin_job(&job_config)?;
 
     let mut page_number = 0;
+    let mut job_raster_bytes: u64 = 0;
 
     // 3. Sayfa Döngüsü
     while let Some(header) = next_header.take() {
@@ -526,6 +584,11 @@ fn process_cups_raster_to_spl<W: Write>(
                 ),
             ));
         }
+
+        // Sayfa sayısı sınırının çözünürlüğe duyarlı tamamlayıcısı; gerekçe
+        // için `MAX_JOB_RASTER_BYTES`e bakın. Doğrulamadan SONRA sayılıyor,
+        // böylece reddedilen bir sayfa bütçeyi tüketmez.
+        accumulate_job_raster_bytes(&mut job_raster_bytes, header.total_raster_bytes())?;
 
         // `sanitize_copies` ile aynı değer loglanır: aksi halde bu satır,
         // yazıcıya fiilen gönderilen (aşağıda begin_page/end_page ile
@@ -610,11 +673,30 @@ fn process_cups_raster_to_spl<W: Write>(
             header.width, page_width_pixels, band_width_pixels, band_width_bytes, margin_bytes
         );
 
+        // Tanınmayan bir ölçü A4'e düşer (bkz. spl.rs from_dimensions_pt).
+        // Geri düşüşün kendisi kasıtlı, ama SESSİZ olması değildi: yazıcıya
+        // sayfanın gerçek ölçüsünden farklı bir kağıt kodu gider ve bu, yanlış
+        // tepsiden besleme ya da kaymış hizalama olarak ortaya çıkar. PPD'nin
+        // sunmadığı bir ölçü (ör. PPD'ye eklenmiş ama tabloya eklenmemiş yeni
+        // bir kağıt) buradan görülebilsin diye bir kez bildiriliyor.
+        let paper_size = match SplPaperSize::from_dimensions_pt_exact(
+            header.page_size_points[0],
+            header.page_size_points[1],
+        ) {
+            Some(size) => size,
+            None => {
+                eprintln!(
+                    "WARNING: Tanınmayan kağıt ölçüsü {} x {} pt; QPDL kağıt kodu A4 \
+                     olarak gönderiliyor. Çıktı yanlış tepsiden beslenebilir ya da \
+                     kaymış hizalanabilir.",
+                    header.page_size_points[0], header.page_size_points[1]
+                );
+                SplPaperSize::A4
+            }
+        };
+
         let page_config = PageConfig {
-            paper_size: SplPaperSize::from_dimensions_pt(
-                header.page_size_points[0],
-                header.page_size_points[1],
-            ),
+            paper_size,
             // ELLE DUPLEX EKSİĞİ (1/2): SpliX qpdl.cpp renderPage, elle duplex
             // modunda ön yüz geçişinde kağıt kaynağını değiştirir:
             //
@@ -753,42 +835,49 @@ fn stream_page_bands<R: Read, W: Write>(
 
 /// CUPS Raster sayfa başlığından elde edilen meta verileri formatlayıp stderr'e basar.
 fn print_header_info(page_num: u32, header: &PageHeader) {
-    eprintln!("--------------------------------------------------");
-    eprintln!(" [CUPS RASTER SAYFA {} META VERİLERİ]", page_num);
+    // Her satır `DEBUG: ` ile başlıyor. CUPS, bir filtrenin stderr'inde
+    // tanıdığı önekleri (DEBUG/INFO/WARNING/ERROR/PAGE/...) o seviyeye
+    // yönlendirir; ÖNEKSİZ satırları da DEBUG sayar, yani varsayılan
+    // `LogLevel warn` altında davranış aynıdır. Fark `LogLevel debug`ta ortaya
+    // çıkıyordu: bu blok sayfa başına ~15 satır üretiyor ve öneksiz satırlar
+    // niyeti belirsiz bırakıyordu. Önek, satırların teşhis amaçlı olduğunu
+    // hem CUPS'a hem logu okuyana açıkça söyler.
+    eprintln!("DEBUG: --------------------------------------------------");
+    eprintln!("DEBUG:  [CUPS RASTER SAYFA {} META VERİLERİ]", page_num);
     eprintln!(
-        "  Çözünürlük (DPI): {} x {}",
+        "DEBUG:   Çözünürlük (DPI): {} x {}",
         header.hw_resolution[0], header.hw_resolution[1]
     );
     eprintln!(
-        "  Boyutlar (px)   : {} x {} (Genişlik x Yükseklik)",
+        "DEBUG:   Boyutlar (px)   : {} x {} (Genişlik x Yükseklik)",
         header.width, header.height
     );
     eprintln!(
-        "  Sayfa Boyutu(pt): {} x {} pt",
+        "DEBUG:   Sayfa Boyutu(pt): {} x {} pt",
         header.page_size_points[0], header.page_size_points[1]
     );
     if let Some(name) = &header.page_size_name {
         // `cupsPageSizeName` raster başlığındaki 64 baytlık bir C dizesidir ve
         // işi gönderen istemciden gelir — argv'deki `title`/`user` kadar
         // güvenilmezdir, bu yüzden ham değil kaçırılmış olarak basılır.
-        eprintln!("  Medya Adı       : {}", quote_untrusted(name));
+        eprintln!("DEBUG:   Medya Adı       : {}", quote_untrusted(name));
     }
-    eprintln!("  Renk Uzayı      : {}", header.color_space);
-    eprintln!("  Renk Dizilimi   : {:?}", header.color_order);
-    eprintln!("  Kanal Bit Derin.: {}", header.bits_per_color);
-    eprintln!("  Piksel Bit Der. : {}", header.bits_per_pixel);
-    eprintln!("  Satır Bayt Say. : {} bayt", header.bytes_per_line);
+    eprintln!("DEBUG:   Renk Uzayı      : {}", header.color_space);
+    eprintln!("DEBUG:   Renk Dizilimi   : {:?}", header.color_order);
+    eprintln!("DEBUG:   Kanal Bit Derin.: {}", header.bits_per_color);
+    eprintln!("DEBUG:   Piksel Bit Der. : {}", header.bits_per_pixel);
+    eprintln!("DEBUG:   Satır Bayt Say. : {} bayt", header.bytes_per_line);
     eprintln!(
-        "  Ham Raster Boy. : {} bayt ({:.2} MB)",
+        "DEBUG:   Ham Raster Boy. : {} bayt ({:.2} MB)",
         header.total_raster_bytes(),
         header.total_raster_bytes() as f64 / (1024.0 * 1024.0)
     );
     eprintln!(
-        "  Çift Taraflı    : {}",
+        "DEBUG:   Çift Taraflı    : {}",
         if header.duplex { "Açık" } else { "Kapalı" }
     );
-    eprintln!("  Kopya Sayısı    : {}", header.num_copies);
-    eprintln!("--------------------------------------------------");
+    eprintln!("DEBUG:   Kopya Sayısı    : {}", header.num_copies);
+    eprintln!("DEBUG: --------------------------------------------------");
 }
 
 #[cfg(test)]
@@ -1478,6 +1567,60 @@ mod tests {
         assert!(err.to_string().contains("sayfa sınırını aştı"), "{}", err);
         // Sınır aşılsa bile iş düzgün kapatılmalı (Y-03 garantisi).
         assert!(out.ends_with(spl::PJL_END));
+    }
+
+    /// Ham raster hacmi bütçesi uygulanmalı ve tam sınırda kabul etmeli.
+    #[test]
+    fn test_job_raster_byte_budget_is_enforced() {
+        let mut total = 0u64;
+        accumulate_job_raster_bytes(&mut total, MAX_JOB_RASTER_BYTES)
+            .expect("bütçenin tamamı kabul edilmeli");
+        assert_eq!(total, MAX_JOB_RASTER_BYTES);
+
+        let err = accumulate_job_raster_bytes(&mut total, 1)
+            .expect_err("bütçeyi bir bayt aşmak hata vermeli");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("ham raster hacmi"), "{}", err);
+
+        // Sarma yerine doyma: sınırlar ileride büyütülse bile taşma sessizce
+        // bütçeyi sıfırlamamalı.
+        let mut huge = u64::MAX - 1;
+        assert!(accumulate_job_raster_bytes(&mut huge, u64::MAX).is_err());
+        assert_eq!(huge, u64::MAX);
+    }
+
+    /// Bütçe, normal çözünürlüklü işlerin davranışını DEĞİŞTİRMEMELİ:
+    /// `MAX_PAGES_PER_JOB` kadar A4 @600 DPI sayfa bütçenin altında kalmalı.
+    #[test]
+    fn test_job_budget_does_not_bind_for_600dpi_pages_within_page_limit() {
+        // cupsfilter'ın gerçek A4 @600 DPI çıktısı: 596 B/satır x 6816 satır.
+        let a4_600 = 596u64 * 6816;
+        let worst = a4_600 * MAX_PAGES_PER_JOB as u64;
+        assert!(
+            worst < MAX_JOB_RASTER_BYTES,
+            "5.000 A4@600DPI sayfa ({} bayt) bütçeyi ({}) aşmamalı",
+            worst,
+            MAX_JOB_RASTER_BYTES
+        );
+    }
+
+    /// ...ama en büyük kabul edilebilir sayfada GERÇEKTEN devreye girmeli,
+    /// yoksa sayfa sınırının çözünürlük körlüğü kapanmamış olur.
+    #[test]
+    fn test_job_budget_binds_before_page_limit_at_max_page_size() {
+        let max_page = MAX_BYTES_PER_LINE as u64 * MAX_LINES as u64;
+        let pages_allowed = MAX_JOB_RASTER_BYTES / max_page;
+        assert!(
+            pages_allowed > 0,
+            "bütçe tek bir azami sayfayı bile reddediyor"
+        );
+        assert!(
+            pages_allowed < MAX_PAGES_PER_JOB as u64,
+            "azami boyutlu sayfalarda bütçe sayfa sınırından önce devreye girmeli \
+             (izin verilen: {}, sayfa sınırı: {})",
+            pages_allowed,
+            MAX_PAGES_PER_JOB
+        );
     }
 
     /// Sınırın tam üstündeki bir iş sorunsuz işlenmeli.

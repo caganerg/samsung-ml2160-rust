@@ -55,8 +55,17 @@ pub enum SplPaperSize {
 }
 
 impl SplPaperSize {
-    pub fn from_dimensions_pt(width_pt: u32, height_pt: u32) -> Self {
-        match (width_pt, height_pt) {
+    /// Fiziksel ölçüyü TANINAN bir QPDL kağıt koduna eşler; tablo dışındaki
+    /// her ölçü için `None` döner.
+    ///
+    /// `from_dimensions_pt` bunun A4'e düşen sarmalayıcısıdır. Ayrım, çağıranın
+    /// "gerçekten A4" ile "tanınmadı, A4 varsayıldı" durumlarını ayırt
+    /// edebilmesi için var: ikincisinde yazıcıya sayfanın gerçek ölçüsünden
+    /// FARKLI bir kağıt kodu gönderilir (yanlış tepsiden besleme, yanlış
+    /// hizalama), dolayısıyla sessiz kalmamalıdır — bkz. main.rs sayfa
+    /// döngüsündeki uyarı.
+    pub fn from_dimensions_pt_exact(width_pt: u32, height_pt: u32) -> Option<Self> {
+        Some(match (width_pt, height_pt) {
             (595, 842) | (842, 595) => SplPaperSize::A4,
             (612, 792) | (792, 612) => SplPaperSize::Letter,
             (612, 1008) | (1008, 612) => SplPaperSize::Legal,
@@ -74,8 +83,19 @@ impl SplPaperSize {
             (297, 684) | (684, 297) => SplPaperSize::Env10,
             (312, 624) | (624, 312) => SplPaperSize::Dl,
             (459, 649) | (649, 459) => SplPaperSize::C5,
-            _ => SplPaperSize::A4,
-        }
+            _ => return None,
+        })
+    }
+
+    /// Fiziksel ölçüyü QPDL kağıt koduna eşler; tanınmayan ölçü A4'e düşer.
+    ///
+    /// Geri düşüş kasıtlı: bilinmeyen bir ölçüde işi reddetmek yerine yazıcının
+    /// kesinlikle tanıdığı bir koda düşmek, `Custom` (21) gibi bu motor
+    /// ailesinde doğrulanmamış bir kodu denemekten daha güvenli. Ama geri
+    /// düşüşün GERÇEKLEŞTİĞİ çağıran tarafından görülebilmelidir; bunun için
+    /// `from_dimensions_pt_exact` kullanılır.
+    pub fn from_dimensions_pt(width_pt: u32, height_pt: u32) -> Self {
+        Self::from_dimensions_pt_exact(width_pt, height_pt).unwrap_or(SplPaperSize::A4)
     }
 }
 
@@ -635,7 +655,10 @@ fn sanitize_pjl_field(input: &str) -> String {
 
 pub struct SplStreamWriter<W: Write> {
     writer: W,
-    current_band: u8,
+    /// Sayfa içindeki bant sırası. QPDL kaydında 8 BİTLİK bir alan (`0x1`),
+    /// ama sayaç burada `u16` tutuluyor ki 256. bantta sessizce sarmak yerine
+    /// `u8::try_from` ile net bir hata versin (bkz. `write_compressed_band`).
+    current_band: u16,
     /// `begin_job` çağrıldı ama `end_job` henüz çağrılmadı mı?
     ///
     /// `Drop` uygulaması bunu okuyarak, yarıda kalan bir işin kapanış UEL'ini
@@ -788,16 +811,47 @@ impl<W: Write> SplStreamWriter<W> {
         // algoritmalarından biri kullanılır. Bu yazıcı ailesinde ham bant firmware
         // tarafından tanınmıyor ("INTERNAL ERROR - Please use the proper driver"
         // ile reddediliyor); bu yüzden burada da her zaman Algo 0x11 RLE kullanılır.
-        let payload_bytes = Algo0x11::compress(raw_bitmap).unwrap_or_default();
+        // `unwrap_or_default()` DEĞİL: `compress` bir `None` döndürdüğünde
+        // (bugün yalnızca girdi boşken; `band_size = bw_bytes * band_height`
+        // olduğu ve ikisi de sıfırdan büyük olduğu için pratikte erişilemez)
+        // boş bir `Vec` kullanmak, başlığı "Algo 0x11 ile sıkıştırılmış" diyen
+        // ama payload'u 0 bayt olan BOZUK bir bant kaydı üretirdi — yazıcı
+        // tarafında sessiz bir çözme hatası. Hata hatadır: yukarı bildiriliyor
+        // ve akış `Drop` üzerinden kapanış UEL'i ile düzgünce sonlandırılıyor.
+        let payload_bytes = Algo0x11::compress(raw_bitmap).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Algo 0x11 sıkıştırıcısı bant için payload üretemedi (boş bant verisi).",
+            )
+        })?;
         let compression_type = SplCompression::Rle;
 
         // Toplam veri boyutu: payload + 4 (sub-header sig) + 4 (checksum)
         let total_data_size = (payload_bytes.len() + 8) as u32;
 
+        // QPDL bant sırası alanı 8 bitliktir. Bugün taşması imkânsız: en kötü
+        // durum, doğrulayıcının kabul ettiği en büyük sayfada (1300 pt @1200
+        // DPI => 21667 satır) 128 satırlık bantlarla 170 bant eder. Ama bu,
+        // `MAX_POINTS` ya da `QPDL_BAND_HEIGHT` değiştiğinde sessizce bozulacak
+        // ÖRTÜK bir invaryanttı: `wrapping_add` 256. bantta sırayı 0'a
+        // döndürüp yazıcıya aynı sıra numarasını ikinci kez bildirirdi.
+        // Artık invaryant örtük değil, uygulanıyor.
+        let band_index = u8::try_from(self.current_band).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Sayfa {} banttan fazlasını içeriyor: QPDL bant sırası alanı 8 bitlik, \
+                     bu yüzden bir sayfada en çok {} bant taşınabilir.",
+                    u8::MAX as u16 + 1,
+                    u8::MAX as u16 + 1
+                ),
+            )
+        })?;
+
         // 1. Şerit Başlığı (Record 0x0C - 11 Bayt)
         let mut band_header = [0u8; 11];
         band_header[0x0] = 0x0C; // Signature 12
-        band_header[0x1] = self.current_band;
+        band_header[0x1] = band_index;
         band_header[0x2] = (band_width_pixels >> 8) as u8;
         band_header[0x3] = (band_width_pixels & 0xFF) as u8;
         band_header[0x4] = (band_height_lines >> 8) as u8;
@@ -823,7 +877,7 @@ impl<W: Write> SplStreamWriter<W> {
         let checksum_bytes = checksum.to_be_bytes();
         self.writer.write_all(&checksum_bytes)?;
 
-        self.current_band = self.current_band.wrapping_add(1);
+        self.current_band += 1;
         Ok(())
     }
 
@@ -886,6 +940,69 @@ impl<W: Write> Drop for SplStreamWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QPDL bant sırası alanı 8 bitliktir; 257. bant sessizce 0'a sarmak
+    /// yerine hata vermeli. Bugün erişilemez (en kötü durum 170 bant), ama
+    /// invaryant `MAX_POINTS`/`QPDL_BAND_HEIGHT` değiştiğinde bozulmasın diye
+    /// pinleniyor.
+    #[test]
+    fn test_band_index_beyond_255_is_rejected_not_wrapped() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut w = SplStreamWriter::new(&mut out);
+        let band = vec![0u8; 8];
+        for i in 0..=255u16 {
+            w.write_compressed_band(64, 1, &band)
+                .unwrap_or_else(|e| panic!("bant {} reddedildi: {}", i, e));
+        }
+        let err = w
+            .write_compressed_band(64, 1, &band)
+            .expect_err("257. bant hata vermeli");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("8 bitlik"), "{}", err);
+    }
+
+    /// Sayaç sayfa başına sıfırlanır: art arda gelen sayfalar birbirinin
+    /// bant sırasını tüketmemeli.
+    #[test]
+    fn test_band_index_resets_on_each_page() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut w = SplStreamWriter::new(&mut out);
+        let band = vec![0u8; 8];
+        for _ in 0..2 {
+            w.begin_page(&PageConfig::default()).unwrap();
+            for _ in 0..200 {
+                w.write_compressed_band(64, 1, &band).unwrap();
+            }
+        }
+    }
+
+    /// Tanınan bir A4 ile "tanınmadı, A4'e düşüldü" durumu ayırt edilebilmeli;
+    /// çağıran taraf ikincisini uyarı olarak bildiriyor (bkz. main.rs).
+    #[test]
+    fn test_unknown_paper_size_is_distinguishable_from_real_a4() {
+        assert_eq!(
+            SplPaperSize::from_dimensions_pt_exact(595, 842),
+            Some(SplPaperSize::A4)
+        );
+        assert_eq!(SplPaperSize::from_dimensions_pt_exact(612, 936), None);
+        // Sarmalayıcının geri düşüşü değişmedi.
+        assert_eq!(SplPaperSize::from_dimensions_pt(612, 936), SplPaperSize::A4);
+    }
+
+    /// Sıkıştırıcı payload üretemezse bant kaydı BOŞ payload'la yazılmamalı.
+    #[test]
+    fn test_empty_band_data_is_an_error_not_an_empty_record() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut w = SplStreamWriter::new(&mut out);
+            let err = w
+                .write_compressed_band(64, 1, &[])
+                .expect_err("boş bant verisi hata vermeli");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+        // `begin_job` çağrılmadığı için `Drop` da bir şey yazmamalı.
+        assert!(out.is_empty(), "hata durumunda hiçbir bayt yazılmamalı");
+    }
 
     #[test]
     fn test_sanitize_pjl_field_strips_injection_chars() {
