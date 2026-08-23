@@ -25,8 +25,8 @@
 *LandscapeOrientation: Plus90
 *TTRasterizer: Type42
 *% Real printers report their own model in MDL (e.g. "ML-2165W Series"), so
-*% this generic ID is only a fallback; install.sh assigns this PPD manually
-*% via `lpadmin -P`, so exact 1284DeviceID matching isn't required.
+*% this generic ID is only a fallback; the queue is created by assigning this
+*% PPD manually via `lpadmin -P`, so exact 1284DeviceID matching isn't required.
 *1284DeviceID: "MFG:Samsung;MDL:ML-2160 Series;CMD:SPL,FWV,EXT;"
 
 *% ============================================================================

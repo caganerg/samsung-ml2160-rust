@@ -18,7 +18,34 @@ ML-2160, ML-2165, ML-2165W, ML-2168 (same QPDL v3 protocol family).
 
 ## Installation
 
-First find your printer's device URI:
+There is no install script — the steps below *are* the procedure. Run them from
+the repository root as your normal user: only the two `sudo` lines write to
+system paths, so **don't run the whole sequence as root**.
+
+### 1. Check that the repository path is under your control
+
+```sh
+namei -l .
+```
+
+Every component from `/` down to the repository must be owned by you or by
+root, and none of them may be group- or world-writable (a sticky directory such
+as `/tmp` is acceptable for the parents, since only an entry's owner can replace
+it there). Check the build inputs too — `src/`, `Cargo.toml` and `Cargo.lock`
+end up compiled into the binary, and `ppd/` into the installed PPD:
+
+```sh
+find . -path ./target -prune -o -perm /022 -print
+```
+
+This is not boilerplate caution. Steps 3 and 4 copy the filter binary and the
+PPD into system locations **as root**, and a PPD is not a passive config file: its
+`*cupsFilter`/`*cupsFilter2` line names the program CUPS executes for every
+print job, as user `lp`. Anyone who can write into the repository — or replace
+any directory above it — can therefore have a program of their own installed as
+a root-owned CUPS filter.
+
+### 2. Find your printer's device URI
 
 ```sh
 lpinfo -v
@@ -26,64 +53,73 @@ lpinfo -v
 
 Copy the URI from the second column of the line matching your printer — a USB printer looks like `usb://Samsung/ML-2165W%20Series?serial=...`, an mDNS/Bonjour-discovered one like `dnssd://Samsung%20ML-2165W%20Series._pdl-datastream._tcp.local/`. A network/Wi-Fi model that isn't listed (e.g. an ML-2165W that mDNS hasn't found) accepts raw print data on the JetDirect port, so use `socket://<printer-ip>:9100` — these printers do not speak IPP.
 
-Then pass it, together with the queue name you want, to the install script — it treats every URI form the same way, so only the value below changes:
+Every form is used the same way below, so only the value changes:
 
 ```sh
 DEVICE_URI="usb://Samsung/ML-2165W%20Series?serial=Z1A2B3C4D5"   # USB
 DEVICE_URI="socket://192.168.1.50:9100"                         # network / Wi-Fi (JetDirect)
-
-./install.sh ML2160_Rust "$DEVICE_URI"
 ```
 
-A `dnssd://...` URI copied straight out of `lpinfo -v` is passed exactly like the two above. Quote the URI in every case: `usb://` URIs contain `?` and `&`, which the shell would otherwise interpret.
+Keep it quoted everywhere: `usb://` URIs contain `?` and `&`, which the shell would otherwise interpret.
 
-The script builds the project (`cargo build --release`), verifies that nothing outside your control can substitute the build artefacts, installs the filter binary into `/usr/lib/cups/filter/`, validates the PPD (`cupstestppd`), and registers the CUPS queue. It only asks for a `sudo` password on the steps that write to system files — **don't run the whole script with `sudo`**.
-
-Send a test print:
-
-```sh
-lp -d ML2160_Rust file.pdf
-```
-
-> [!NOTE]
-> Both arguments are required on purpose. The script used to auto-detect the printer by grepping `lpinfo -v`, but CUPS device discovery is unauthenticated — over the network (mDNS/Bonjour/SNMP) and over USB (descriptor strings) alike — so any device can advertise itself as a "Samsung ML-216x" and be wired up as the print destination, silently receiving your documents over unencrypted JetDirect. Reading `lpinfo -v` yourself keeps the same human review without the script having to render device-supplied text in your terminal.
-
-> [!IMPORTANT]
-> Keep the repository on a path whose every component is writable only by you or by root. The install script copies the filter binary and the PPD into system locations **as root**, and a PPD is not a passive config file: its `*cupsFilter`/`*cupsFilter2` line names the program CUPS executes for every print job, as user `lp`. If another user can replace the repository directory — or anything above it — they can have their own binary installed as a root-owned CUPS filter. The script refuses to continue if it finds such a path, but you can check yourself with `namei -l .`.
-
-### Manual Installation
-
-If you'd rather not use `install.sh`, run the same steps by hand:
+### 3. Build, install the filter, validate the PPD
 
 ```sh
 cargo build --release
 sudo install -m 755 -o root -g root \
     target/release/rastertospl-rust /usr/lib/cups/filter/rastertospl-rust
 cupstestppd ppd/samsung-ml2160.ppd
-sudo lpadmin -p ML2160_Rust -E -v "$DEVICE_URI" -P ppd/samsung-ml2160.ppd
 ```
-
-`$DEVICE_URI` is the same URI you would have passed to `install.sh` — a `usb://`, `socket://` or `dnssd://` one, depending on the connection.
-
-Two details the script would otherwise handle for you:
 
 - **Use `install`, not `cp`.** The `-m 755 -o root -g root` flags matter: a filter that is writable by a non-root user is a filter someone else can replace.
 - **Run `cupstestppd` after the binary is in place.** It checks that the file referenced by the PPD's `cupsFilter`/`cupsFilter2` line actually exists, so running it first reports a failure that isn't real.
 
+### 4. Register the CUPS queue
+
+```sh
+sudo lpadmin -p ML2160_Rust -E -v "$DEVICE_URI" -P ppd/samsung-ml2160.ppd
+```
+
+`ML2160_Rust` is the queue name and is yours to choose; CUPS allows at most 127 characters and rejects spaces, `/` and `#`, so stick to letters, digits, `_`, `.` and `-`.
+
+Then send a test print:
+
+```sh
+lp -d ML2160_Rust file.pdf
+```
+
+> [!NOTE]
+> Pick the device URI yourself rather than letting anything auto-detect it. CUPS device discovery is unauthenticated — over the network (mDNS/Bonjour/SNMP) and over USB (descriptor strings) alike — so any device can advertise itself as a "Samsung ML-216x" and be wired up as the print destination, silently receiving your documents over unencrypted JetDirect. Reading `lpinfo -v` and choosing the line yourself is the review step that prevents this.
+
 ## Uninstallation
 
-```sh
-./uninstall.sh ML2160_Rust
-```
-
-This removes the named queue and then deletes the filter binary — but only once no installed PPD under `/etc/cups/ppd/` still references it, so other queues using this driver keep working. List your queues with `lpstat -p` if you're unsure of the name.
-
-By hand:
+### 1. Remove the queue
 
 ```sh
+lpstat -p                       # if you're unsure of the name
 sudo lpadmin -x ML2160_Rust
-sudo rm -f /usr/lib/cups/filter/rastertospl-rust   # only if no other queue uses this driver
 ```
+
+### 2. Remove the filter binary, but only once nothing still uses it
+
+The binary is shared by every queue built on this driver, so deleting it while
+another one is still installed breaks that queue silently — its jobs start
+failing with "filter failed". Ask which installed PPDs still name the filter:
+
+```sh
+sudo grep -rlsF rastertospl-rust /etc/cups/ppd/
+```
+
+`lpadmin -x` already deleted the removed queue's own PPD, so it won't appear
+here. If the command prints nothing, no queue needs the filter any more:
+
+```sh
+sudo rm -f /usr/lib/cups/filter/rastertospl-rust
+```
+
+Note that the question is which PPD references the filter, not which queue looks
+like a Samsung: a queue created against a plain `socket://<ip>:9100` address
+carries no model name anywhere in its device URI.
 
 ## Testing
 
@@ -106,8 +142,6 @@ cargo test
 - `src/raster.rs` — CUPS Raster (V1/V2/V3) header parser
 - `src/spl.rs` — SPL2/QPDL protocol: PJL envelope, page/band records, Algo 0x11 RLE
 - `ppd/samsung-ml2160.ppd` — CUPS PPD file
-- `install.sh` — build + system installation
-- `uninstall.sh` — queue and filter removal
 - `test_pipeline.sh` — end-to-end pipeline test and SPL2 format validator
 
 ## License
