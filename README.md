@@ -123,18 +123,33 @@ carries no model name anywhere in its device URI.
 
 ## Testing
 
-`test_pipeline.sh` generates a sample PDF (via Ghostscript), converts it to a CUPS raster stream with `cupsfilter`, runs it through the filter, and parses/validates the resulting SPL2 file's PJL/QPDL record structure (page header, band records, checksums, job end):
-
-```sh
-./test_pipeline.sh                 # auto-generates a sample PDF
-./test_pipeline.sh mine.pdf        # or use your own PDF
-```
-
-Unit tests (including an Algo 0x11 RLE round-trip test):
-
 ```sh
 cargo test
 ```
+
+75 unit tests cover the CUPS Raster parser (v1/v2/v3, both endiannesses, the
+v2 line-RLE decoder), page-header validation, the SPL2/QPDL record layout, the
+Algo 0x11 RLE round trip, PJL field sanitisation, and every resource limit the
+filter enforces.
+
+Several of them are pinned against measurements from real `cupsfilter` output
+rather than from the specification — `test_validate_page_header_accepts_real_cupsfilter_heights`
+carries the observed `cupsHeight` for each paper size and resolution (A4 at
+600 DPI is 6816 lines, not the 7017 the page dimensions alone suggest, because
+the PPD's `*ImageableArea` margins come off first). Keep that table measured,
+not computed, if you extend it.
+
+There is no end-to-end script. To check the filter against the real CUPS
+toolchain by hand:
+
+```sh
+cargo build --release
+cupsfilter -p ppd/samsung-ml2160.ppd -m application/vnd.cups-raster -- doc.pdf > test.raster
+./target/release/rastertospl-rust 101 testuser Test 1 "" test.raster > out.spl
+```
+
+A well-formed `out.spl` starts with `\x1b%-12345X@PJL`, contains
+`@PJL ENTER LANGUAGE = QPDL`, and ends with `\t\x1b%-12345X`.
 
 ## Project Structure
 
@@ -142,7 +157,6 @@ cargo test
 - `src/raster.rs` — CUPS Raster (V1/V2/V3) header parser
 - `src/spl.rs` — SPL2/QPDL protocol: PJL envelope, page/band records, Algo 0x11 RLE
 - `ppd/samsung-ml2160.ppd` — CUPS PPD file
-- `test_pipeline.sh` — end-to-end pipeline test and SPL2 format validator
 
 ## License
 
