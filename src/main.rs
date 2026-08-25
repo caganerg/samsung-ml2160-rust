@@ -442,61 +442,125 @@ fn band_height_for(header: &PageHeader) -> usize {
 /// Sayfa döngüsünün üst sınırı yoktu: akış ne kadar uzunsa o kadar sayfa
 /// üretiliyordu. Bu hem doğrudan kâğıt/toner tüketimini sınırsız bırakıyor
 /// (`MAX_REALISTIC_COPIES` ile çarpıldığında daha da fazlası), hem de
-/// sıkıştırıcının sayfa başına maliyetini (ölçülen en kötü durum: sıkıştırılamaz
-/// gürültüde ~7,4 MB/s, yani tam boy bir sayfa için ~6 s CPU) toplamda
-/// sınırsız kılıyordu. Filtre CUPS kuyruğunu tek iş parçacığıyla işlediği için
-/// uzun bir iş sıradaki tüm işleri bekletir.
+/// sıkıştırıcının sayfa başına maliyetini toplamda sınırsız kılıyordu. Filtre
+/// CUPS kuyruğunu tek iş parçacığıyla işlediği için uzun bir iş sıradaki tüm
+/// işleri bekletir.
 ///
-/// 5.000 sayfa, gerçek bir belge için fazlasıyla cömert (bir kutu kâğıdın on
-/// katı) ama sınırsız değil.
-const MAX_PAGES_PER_JOB: u32 = 5_000;
+/// Sınır 5.000'den 1.000'e ÇEKİLDİ. Gerekçe, hedef donanımın kendisi: ML-2160
+/// serisi ~20 sayfa/dakika basar, yani 1.000 sayfalık bir iş yazıcıyı zaten
+/// ~50 dakika meşgul eder ve iki top kâğıt tüketir. 5.000 sayfa (~4 saat kesintisiz
+/// baskı) bu sınıf bir kişisel yazıcıda gerçek bir belge değil, yalnızca
+/// kötüye kullanım senaryosunun tavanıydı. Sınırı düşürmek, filtrenin en kötü
+/// durumdaki CPU maliyetini de aynı oranda düşürür (bkz.
+/// `MAX_JOB_RASTER_BYTES`).
+const MAX_PAGES_PER_JOB: u32 = 1_000;
 
 /// Tek bir baskı işinde işlenebilecek azami HAM RASTER hacmi (bayt).
 ///
-/// `MAX_PAGES_PER_JOB` tek başına yetersizdi, çünkü ÇÖZÜNÜRLÜK KÖRÜdür: bir
+/// `MAX_PAGES_PER_JOB` tek başına yetersiz, çünkü ÇÖZÜNÜRLÜK KÖRÜdür: bir
 /// sayfanın işlenme maliyeti sayfa sayısıyla değil, bayt sayısıyla ölçeklenir.
-/// Ölçülen değerler (bu makinede, release derlemesi):
+/// Ölçülen değerler (bu makinede, release derlemesi, 346.752 baytlık gerçek
+/// bant boyutunda):
 ///
-/// * sıkıştırılabilir (sıfır dolu) A4 @600 DPI sayfa: ~225 MB/s
-/// * SIKIŞTIRILAMAZ gürültü: ~10,5 MB/s
+/// * sıkıştırılabilir (sıfır dolu) bant: ~166 MB/s
+/// * SIKIŞTIRILAMAZ gürültü: ~6,65 MB/s
 ///
-/// Yani en kötü durum çözünürlükle birlikte büyüyordu: 5.000 sayfa @600 DPI
-/// ~20 GB ve ~32 dakika CPU iken, aynı 5.000 sayfa doğrulayıcının kabul ettiği
-/// en büyük ölçüde (~44,8 MB/sayfa) ~224 GB ve ~6 SAAT CPU ediyordu. Filtre
-/// CUPS kuyruğunu tek iş parçacığıyla işlediği için bu süre boyunca sıradaki
-/// tüm işler bekler.
+/// Aradaki ~25 katlık fark, bayt cinsinden bir bütçenin CPU süresini ancak
+/// kaba biçimde sınırlayabildiği anlamına gelir; bu yüzden bütçe, en kötü
+/// durum kabul edilebilir kalacak şekilde seçilmelidir.
 ///
-/// 32 GiB, iki sınırın da anlamlı kalacağı şekilde seçildi:
+/// GİRDİ BOYUTUNDAN BAĞIMSIZLIK (ölçülmüş): bu bütçe ÇÖZÜLMÜŞ raster hacmini
+/// sayar, girdi hacmini değil. CUPS Raster v2'nin satır-RLE'si ile arada
+/// ~30.000 katlık bir genişleme mümkündür — doğrulayıcının kabul ettiği en
+/// büyük geometride (1300 pt @1200 DPI => 2709 B/satır x 21.675 satır) tamamen
+/// beyaz sayfalardan oluşan **1,13 MB**'lik bir akış, eski 32 GiB bütçesi
+/// altında filtreyi **159 saniye** tek çekirdekte meşgul ediyordu. Yani
+/// saldırganın maliyeti ile filtrenin maliyeti arasında bağ yok; tek gerçek
+/// savunma tavanın kendisini düşük tutmaktır.
 ///
-/// * @600 DPI'da A4 sayfa 596 x 6816 = ~3,87 MB'dir; 5.000 sayfa ~20,3 GB eder,
-///   yani bütçenin ~%57 altında kalır. Sayfa sınırına kadar olan hiçbir normal
-///   çözünürlüklü iş bu kontrole TAKILMAZ — davranış değişmez.
-/// * En büyük kabul edilebilir sayfada (4096 B/satır x 24.000 satır = ~98 MB)
-///   bütçe ~349 sayfada devreye girer ve en kötü durum CPU'yu ~6 saatten
-///   ~52 dakikaya çeker.
-const MAX_JOB_RASTER_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+/// 8 GiB, iki sınırın da anlamlı kalacağı şekilde seçildi:
+///
+/// * @600 DPI'da A4 sayfa 596 x 6816 = ~3,87 MB'dir; `MAX_PAGES_PER_JOB` kadarı
+///   (1.000 sayfa) ~4,06 GB eder, yani bütçenin ~%50 altında kalır. Sayfa
+///   sınırına kadar olan hiçbir normal çözünürlüklü iş bu kontrole TAKILMAZ.
+/// * En büyük kabul edilebilir sayfada (~58,7 MB) bütçe ~146 sayfada devreye
+///   girer; yukarıdaki 1,13 MB'lik saldırı 159 saniye yerine ~37 saniye eder.
+const MAX_JOB_RASTER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// İşin şimdiye kadar işlediği ham raster hacmini günceller ve bütçeyi aşıp
-/// aşmadığını bildirir.
+/// Tek bir baskı işinin üretebileceği azami YAPRAK sayısı (sayfa x kopya).
 ///
-/// Toplama `saturating_add` ile yapılıyor: sayfa başına hacim
-/// `validate_page_header` sayesinde ~98 MB ile sınırlı ve sayfa sayısı 5.000
-/// ile, dolayısıyla `u64` taşması zaten imkânsız — ama sınırlar değişirse
-/// sessizce sarmak yerine bütçeyi aşmış sayılması doğru davranıştır.
-fn accumulate_job_raster_bytes(total: &mut u64, page_bytes: u64) -> io::Result<()> {
-    *total = total.saturating_add(page_bytes);
-    if *total > MAX_JOB_RASTER_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
+/// `MAX_PAGES_PER_JOB` ve `MAX_REALISTIC_COPIES` ayrı ayrı gerekçelendirilmişti
+/// ama ÇARPIMLARI hiçbir yerde sınırlanmıyordu: eski değerlerle tek bir iş
+/// 5.000 x 999 = 4.995.000 yaprak basma komutu üretebiliyordu. `num_copies`
+/// sayfa başlığından, yani güvenilmez taraftan geldiği için kâğıt/toner
+/// tüketimi açısından anlamlı olan tek sınır budur — sayfa sayısı değil,
+/// yaprak sayısı.
+///
+/// 10.000 yaprak ~20 sayfa/dakikada ~8 saatlik kesintisiz baskıdır: hiçbir
+/// meşru işin yaklaşamayacağı kadar cömert, ama milyonlarca yapraktan da
+/// beş yüz kat uzak.
+const MAX_JOB_IMPRESSIONS: u64 = 10_000;
+
+/// Bir işin tükettiği kaynakların toplu muhasebesi.
+///
+/// Üç sayacın da tek bir yerde durmasının nedeni, birbirlerinin körlüğünü
+/// kapatmaları: sayfa sayısı çözünürlük körü, raster hacmi kopya körü, yaprak
+/// sayısı ise sayfa boyutu körüdür. Ayrı ayrı uygulandıklarında aralarındaki
+/// çarpımsal boşluklar (bkz. `MAX_JOB_IMPRESSIONS`) gözden kaçıyordu.
+#[derive(Debug, Default)]
+struct JobBudget {
+    pages: u32,
+    raster_bytes: u64,
+    impressions: u64,
+}
+
+impl JobBudget {
+    /// Doğrulanmış bir sayfayı bütçeye işler ve sayfanın 1 TABANLI sırasını
+    /// döner. Sınırlardan herhangi biri aşılırsa iş burada durur.
+    ///
+    /// `copies`, `sanitize_copies`'ten GEÇMİŞ değer olmalıdır: ham
+    /// `num_copies` ile saymak, yazıcıya fiilen gönderilmeyecek kopyaları
+    /// bütçeden düşerdi.
+    ///
+    /// Toplamalar `saturating_add` ile yapılıyor: sayfa başına hacim
+    /// `validate_page_header` sayesinde ~59 MB ile, sayfa sayısı da
+    /// `MAX_PAGES_PER_JOB` ile sınırlı olduğundan `u64` taşması zaten
+    /// imkânsız — ama sınırlar değişirse sessizce sarmak yerine bütçeyi aşmış
+    /// sayılması doğru davranıştır.
+    fn account_page(&mut self, page_raster_bytes: u64, copies: u16) -> io::Result<u32> {
+        let exceeded = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
+
+        self.pages += 1;
+        if self.pages > MAX_PAGES_PER_JOB {
+            return Err(exceeded(format!(
+                "İş, sayfa sınırını aştı: {} sayfadan fazlası işlenmiyor. \
+                 Belge gerçekten bu kadar uzunsa işi parçalara bölün.",
+                MAX_PAGES_PER_JOB
+            )));
+        }
+
+        self.raster_bytes = self.raster_bytes.saturating_add(page_raster_bytes);
+        if self.raster_bytes > MAX_JOB_RASTER_BYTES {
+            return Err(exceeded(format!(
                 "İş, ham raster hacmi sınırını aştı: {} bayttan fazlası işlenmiyor \
                  (şu ana kadar {} bayt). Belge gerçekten bu kadar büyükse işi \
                  parçalara bölün ya da daha düşük bir çözünürlük seçin.",
-                MAX_JOB_RASTER_BYTES, total
-            ),
-        ));
+                MAX_JOB_RASTER_BYTES, self.raster_bytes
+            )));
+        }
+
+        self.impressions = self.impressions.saturating_add(copies as u64);
+        if self.impressions > MAX_JOB_IMPRESSIONS {
+            return Err(exceeded(format!(
+                "İş, yaprak sınırını aştı: {} yapraktan fazlası basılmıyor \
+                 (şu ana kadar {} yaprak = sayfa x kopya). Kopya sayısını \
+                 düşürün ya da işi parçalara bölün.",
+                MAX_JOB_IMPRESSIONS, self.impressions
+            )));
+        }
+
+        Ok(self.pages)
     }
-    Ok(())
 }
 
 /// Gerçekçi bir baskı işi için makul kabul edilen azami kopya sayısı.
@@ -567,28 +631,21 @@ fn process_cups_raster_to_spl<W: Write>(
     spl_writer.begin_job(&job_config)?;
 
     let mut page_number = 0;
-    let mut job_raster_bytes: u64 = 0;
+    let mut budget = JobBudget::default();
 
     // 3. Sayfa Döngüsü
     while let Some(header) = next_header.take() {
         validate_page_header(&header)?;
 
-        page_number += 1;
-        if page_number > MAX_PAGES_PER_JOB {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "İş, sayfa sınırını aştı: {} sayfadan fazlası işlenmiyor. \
-                     Belge gerçekten bu kadar uzunsa işi parçalara bölün.",
-                    MAX_PAGES_PER_JOB
-                ),
-            ));
-        }
+        // Kopya sayısı bir kez normalize edilir ve hem bütçeye hem yazıcıya
+        // AYNI değer gider; iki yerde ayrı ayrı hesaplamak, bütçenin fiilen
+        // basılmayacak kopyaları saymasına yol açardı.
+        let copies = sanitize_copies(header.num_copies);
 
-        // Sayfa sayısı sınırının çözünürlüğe duyarlı tamamlayıcısı; gerekçe
-        // için `MAX_JOB_RASTER_BYTES`e bakın. Doğrulamadan SONRA sayılıyor,
-        // böylece reddedilen bir sayfa bütçeyi tüketmez.
-        accumulate_job_raster_bytes(&mut job_raster_bytes, header.total_raster_bytes())?;
+        // Sayfa sayısı, ham raster hacmi ve yaprak sayısı sınırları; gerekçe
+        // için `JobBudget`e bakın. Doğrulamadan SONRA sayılıyor, böylece
+        // reddedilen bir sayfa bütçeyi tüketmez.
+        page_number = budget.account_page(header.total_raster_bytes(), copies)?;
 
         // `sanitize_copies` ile aynı değer loglanır: aksi halde bu satır,
         // yazıcıya fiilen gönderilen (aşağıda begin_page/end_page ile
@@ -596,7 +653,7 @@ fn process_cups_raster_to_spl<W: Write>(
         // ham/sınırsız `header.num_copies` değerini gösterip yanıltıcı
         // teşhis bilgisi üretebilirdi (ör. 65536 istenirse burada "65536"
         // yazılır ama yazıcıya 999 gönderilirdi).
-        eprintln!("PAGE: {} {}", page_number, sanitize_copies(header.num_copies));
+        eprintln!("PAGE: {} {}", page_number, copies);
         eprintln!("INFO: Sayfa {} başlatılıyor...", page_number);
 
         print_header_info(page_number, &header);
@@ -721,7 +778,7 @@ fn process_cups_raster_to_spl<W: Write>(
             // sayaç 1 tabanlı; `page_number` da öyle (yukarıda kullanımdan
             // ÖNCE artırılıyor). Bkz. spl.rs PageConfig::page_number.
             page_number,
-            copies: sanitize_copies(header.num_copies),
+            copies,
             // SpliX qpdl.cpp renderPage: width = page->width() = pageWidth
             width_pixels: band_width_u16,
             height_pixels: page_height_u16,
@@ -742,7 +799,7 @@ fn process_cups_raster_to_spl<W: Write>(
         )?;
 
         // 3-Baytlık QPDL Sayfa Sonu
-        spl_writer.end_page(sanitize_copies(header.num_copies))?;
+        spl_writer.end_page(copies)?;
 
         eprintln!("INFO: Sayfa {} tamamlandı.\n", page_number);
 
@@ -1527,6 +1584,12 @@ mod tests {
 
     /// Belirtilen sayıda küçük, geçerli sayfadan oluşan bir V3 akışı üretir.
     fn v3_multipage_stream(pages: u32) -> Vec<u8> {
+        v3_multipage_stream_with_copies(pages, 0)
+    }
+
+    /// `v3_multipage_stream`'in, sayfa başlığındaki `cupsNumCopies` alanını da
+    /// ayarlayan sürümü; yaprak (sayfa x kopya) bütçesini sınamak için.
+    fn v3_multipage_stream_with_copies(pages: u32, copies: u32) -> Vec<u8> {
         let mut page = vec![0u8; 1796];
         {
             let mut put = |off: usize, val: u32| {
@@ -1545,6 +1608,7 @@ mod tests {
             put(388, 1); // bits_per_pixel
             put(392, 1); // bytes_per_line
             put(400, 3); // color_space = K
+            put(340, copies); // num_copies
         }
         let mut stream = b"RaS3".to_vec();
         for _ in 0..pages {
@@ -1572,21 +1636,105 @@ mod tests {
     /// Ham raster hacmi bütçesi uygulanmalı ve tam sınırda kabul etmeli.
     #[test]
     fn test_job_raster_byte_budget_is_enforced() {
-        let mut total = 0u64;
-        accumulate_job_raster_bytes(&mut total, MAX_JOB_RASTER_BYTES)
+        let mut budget = JobBudget::default();
+        budget
+            .account_page(MAX_JOB_RASTER_BYTES, 1)
             .expect("bütçenin tamamı kabul edilmeli");
-        assert_eq!(total, MAX_JOB_RASTER_BYTES);
+        assert_eq!(budget.raster_bytes, MAX_JOB_RASTER_BYTES);
 
-        let err = accumulate_job_raster_bytes(&mut total, 1)
+        let err = budget
+            .account_page(1, 1)
             .expect_err("bütçeyi bir bayt aşmak hata vermeli");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("ham raster hacmi"), "{}", err);
 
         // Sarma yerine doyma: sınırlar ileride büyütülse bile taşma sessizce
         // bütçeyi sıfırlamamalı.
-        let mut huge = u64::MAX - 1;
-        assert!(accumulate_job_raster_bytes(&mut huge, u64::MAX).is_err());
-        assert_eq!(huge, u64::MAX);
+        let mut huge = JobBudget {
+            pages: 0,
+            raster_bytes: u64::MAX - 1,
+            impressions: 0,
+        };
+        assert!(huge.account_page(u64::MAX, 1).is_err());
+        assert_eq!(huge.raster_bytes, u64::MAX);
+    }
+
+    /// BULGU 2: sayfa sınırı ile kopya sınırının ÇARPIMI sınırsız olmamalı.
+    ///
+    /// Bu testin varlık nedeni, iki sınırın ayrı ayrı "makul" görünürken
+    /// birlikte 4.995.000 yaprağa (eski değerlerle) izin vermesiydi. Sayaç
+    /// yaprak cinsindendir; sayfa sayısı tek başına anlamlı bir tavan değil.
+    #[test]
+    fn test_page_and_copy_limits_cannot_multiply_without_bound() {
+        let unbounded_product = MAX_PAGES_PER_JOB as u64 * MAX_REALISTIC_COPIES as u64;
+        assert!(
+            MAX_JOB_IMPRESSIONS < unbounded_product,
+            "yaprak sınırı, sayfa x kopya çarpımından ({}) küçük olmalı; \
+             aksi hâlde hiçbir şey sınırlamıyor demektir",
+            unbounded_product
+        );
+
+        // Azami kopya sayısıyla, yaprak bütçesinin izin verdiği sayfa sayısı.
+        let mut budget = JobBudget::default();
+        let allowed = MAX_JOB_IMPRESSIONS / MAX_REALISTIC_COPIES as u64;
+        for page in 1..=allowed {
+            budget
+                .account_page(1, MAX_REALISTIC_COPIES)
+                .unwrap_or_else(|e| panic!("sayfa {} reddedilmemeliydi: {}", page, e));
+        }
+        let err = budget
+            .account_page(1, MAX_REALISTIC_COPIES)
+            .expect_err("yaprak sınırı aşılınca hata beklenir");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("yaprak sınırını aştı"), "{}", err);
+    }
+
+    /// Yaprak bütçesi tam sınırda kabul etmeli, bir yaprak fazlasında reddetmeli.
+    #[test]
+    fn test_impression_budget_is_not_off_by_one() {
+        let mut budget = JobBudget::default();
+        budget
+            .account_page(1, u16::try_from(MAX_JOB_IMPRESSIONS).unwrap())
+            .expect("tam sınır kadar yaprak kabul edilmeli");
+        assert_eq!(budget.impressions, MAX_JOB_IMPRESSIONS);
+        assert!(budget.account_page(1, 1).is_err());
+    }
+
+    /// Bütçe, HAM `num_copies` ile değil `sanitize_copies`'ten geçmiş değerle
+    /// saymalı: yazıcıya gitmeyen kopyalar bütçeyi tüketmemeli, ama 65536 gibi
+    /// bir değer de "0 kopya" sayılıp bütçeden kaçmamalı.
+    #[test]
+    fn test_impression_budget_counts_sanitized_copies() {
+        let mut budget = JobBudget::default();
+        // Eski `as u16` davranışında bu 0 ediyordu; şimdi 999 sayılmalı.
+        budget.account_page(1, sanitize_copies(65_536)).unwrap();
+        assert_eq!(budget.impressions, MAX_REALISTIC_COPIES as u64);
+
+        let mut zero = JobBudget::default();
+        zero.account_page(1, sanitize_copies(0)).unwrap();
+        assert_eq!(zero.impressions, 1, "0 kopya en az 1 yaprak sayılmalı");
+    }
+
+    /// Yaprak sınırı uçtan uca da uygulanmalı ve iş yine düzgün kapanmalı.
+    #[test]
+    fn test_impression_limit_is_enforced_end_to_end() {
+        // Her sayfa azami kopyayla: sınır sayfa sayısından çok önce dolar.
+        let pages = (MAX_JOB_IMPRESSIONS / MAX_REALISTIC_COPIES as u64) as u32 + 1;
+        assert!(pages < MAX_PAGES_PER_JOB, "sayfa sınırı önce devreye girmemeli");
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(v3_multipage_stream_with_copies(
+                pages,
+                MAX_REALISTIC_COPIES as u32,
+            ))),
+            &mut out,
+        )
+        .expect_err("yaprak sınırı aşılınca hata beklenir");
+        assert!(err.to_string().contains("yaprak sınırını aştı"), "{}", err);
+        // Sınır aşılsa bile iş düzgün kapatılmalı (Y-03 garantisi).
+        assert!(out.ends_with(spl::PJL_END));
     }
 
     /// Bütçe, normal çözünürlüklü işlerin davranışını DEĞİŞTİRMEMELİ:
@@ -1598,17 +1746,28 @@ mod tests {
         let worst = a4_600 * MAX_PAGES_PER_JOB as u64;
         assert!(
             worst < MAX_JOB_RASTER_BYTES,
-            "5.000 A4@600DPI sayfa ({} bayt) bütçeyi ({}) aşmamalı",
+            "{} A4@600DPI sayfa ({} bayt) bütçeyi ({}) aşmamalı",
+            MAX_PAGES_PER_JOB,
             worst,
             MAX_JOB_RASTER_BYTES
         );
+    }
+
+    /// Doğrulayıcının GERÇEKTEN kabul edebileceği en büyük sayfanın ham raster
+    /// hacmi. `MAX_BYTES_PER_LINE * MAX_LINES` bir üst sınırdır ama erişilemez:
+    /// D-01/D-02 kontrolleri satır genişliğini ve yüksekliği sayfanın fiziksel
+    /// ölçüsüne bağlar, yani asıl tavan `MAX_POINTS` @ `MAX_DPI`'dır.
+    fn largest_reachable_page_bytes() -> u64 {
+        let bytes_per_line = compute_page_width_pixels(MAX_POINTS, MAX_DPI).div_ceil(8) as u64;
+        let lines = compute_page_height_lines(MAX_POINTS, MAX_DPI) as u64;
+        bytes_per_line * lines
     }
 
     /// ...ama en büyük kabul edilebilir sayfada GERÇEKTEN devreye girmeli,
     /// yoksa sayfa sınırının çözünürlük körlüğü kapanmamış olur.
     #[test]
     fn test_job_budget_binds_before_page_limit_at_max_page_size() {
-        let max_page = MAX_BYTES_PER_LINE as u64 * MAX_LINES as u64;
+        let max_page = largest_reachable_page_bytes();
         let pages_allowed = MAX_JOB_RASTER_BYTES / max_page;
         assert!(
             pages_allowed > 0,
@@ -1620,6 +1779,73 @@ mod tests {
              (izin verilen: {}, sayfa sınırı: {})",
             pages_allowed,
             MAX_PAGES_PER_JOB
+        );
+    }
+
+    /// BULGU 1: bütçe, en kötü durumdaki CPU süresini de sınırlamalı.
+    ///
+    /// Bu sınır bayt cinsinden olduğu için CPU süresini ancak sıkıştırıcının
+    /// ölçülen hızı üzerinden dolaylı olarak bağlar. Aşağıdaki değer bu
+    /// makinede, release derlemesinde, gerçek bant boyutunda (346.752 bayt)
+    /// ölçüldü: sıkıştırılamaz gürültü ~6,65 MB/s (sıfır dolu bantta ~166 MB/s,
+    /// yani en iyi ile en kötü arasında ~25 kat var).
+    ///
+    /// Testin amacı bir hız ölçmek değil — makineden makineye değişir — bütçe
+    /// büyütüldüğünde bunun CPU tarafındaki bedelini görünür kılmak: filtre
+    /// CUPS kuyruğunu tek iş parçacığıyla işlediği için bu süre boyunca
+    /// sıradaki tüm işler bekler.
+    const MEASURED_WORST_CASE_COMPRESS_BPS: u64 = 6_650_000;
+
+    #[test]
+    fn test_raster_budget_bounds_worst_case_cpu_time() {
+        let worst_case_seconds = MAX_JOB_RASTER_BYTES / MEASURED_WORST_CASE_COMPRESS_BPS;
+        assert!(
+            worst_case_seconds <= 30 * 60,
+            "en kötü durumda tek bir iş kuyruğu {} saniye bloke ediyor; \
+             MAX_JOB_RASTER_BYTES ({}) düşürülmeli",
+            worst_case_seconds,
+            MAX_JOB_RASTER_BYTES
+        );
+    }
+
+    /// BULGU 1'in asıl çekirdeği: bütçe ÇÖZÜLMÜŞ raster hacmini sayar, girdi
+    /// hacmini değil — ve CUPS Raster v2'nin satır-RLE'si arada çok büyük bir
+    /// genişleme sağlar. Ölçülen: en büyük geometride tamamen beyaz sayfalardan
+    /// oluşan 1,13 MB'lik bir akış 34,4 GB raster üretiyordu.
+    ///
+    /// Bu yüzden "girdi küçükse iş de küçüktür" varsayımı yapılamaz; tek gerçek
+    /// savunma tavanın kendisidir. Test, o tavanın saldırganın gönderebileceği
+    /// bayt sayısıyla DEĞİL, yalnızca sabitle sınırlı kaldığını pinliyor.
+    #[test]
+    fn test_compressed_input_cannot_amplify_past_the_raster_budget() {
+        // Tek bir v2 satır kaydı 2 bayttır ([tekrar][0x80 = satır sonuna kadar
+        // boşalt]) ve 256 satıra kadar üretir; sayfa başlığı 1796 bayt.
+        let page = largest_reachable_page_bytes();
+        let lines = compute_page_height_lines(MAX_POINTS, MAX_DPI) as u64;
+        let input_per_page = 1796 + 2 * lines.div_ceil(256);
+        let pages = MAX_JOB_RASTER_BYTES / page + 1;
+        let attacker_bytes = pages * input_per_page;
+
+        assert!(
+            attacker_bytes < MAX_JOB_RASTER_BYTES / 1000,
+            "genişleme oranı bu testin varsayımından düşük; ölçümü gözden geçirin"
+        );
+
+        // Asıl garanti: girdi ne kadar küçük olursa olsun, işlenen hacim
+        // bütçeyi aşamaz.
+        let mut budget = JobBudget::default();
+        let mut processed = 0u64;
+        for _ in 0..pages {
+            match budget.account_page(page, 1) {
+                Ok(_) => processed += page,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            processed <= MAX_JOB_RASTER_BYTES,
+            "işlenen hacim ({}) bütçeyi ({}) aştı",
+            processed,
+            MAX_JOB_RASTER_BYTES
         );
     }
 
