@@ -1,0 +1,17 @@
+Package: samsung-ml2160-rust
+Version: 1.0.1-1
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: cups (>= 2.4), cups-filters
+Maintainer: CUPS Raster Filter Developer <caganergun@tutanota.com>
+Homepage: https://github.com/caganerg/samsung-ml2160-rust
+Description: CUPS raster filter for Samsung ML-2160 series printers
+ rastertospl-rust converts the CUPS raster stream (RaSt/RaS2/RaS3) into the
+ native SPL2 / QPDL v3 format spoken by Samsung ML-2160, ML-2165, ML-2165W
+ and ML-2168 monochrome laser printers: PJL job envelope, 17-byte page
+ header, Algo 0x11 RLE-compressed band records and checksums.
+ .
+ The package ships the filter binary and the matching PPD. The filter is
+ statically linked against musl, so it carries no libc dependency of its own
+ and runs unchanged on Debian 13 (trixie) and later.
