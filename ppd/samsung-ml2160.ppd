@@ -126,31 +126,47 @@
 *% ============================================================================
 *% Paper Source (Tray)
 *% ============================================================================
+*% MediaPosition değerleri QPDL kağıt kaynağı kodlarıdır (SpliX printer.cpp:
+*% Auto=1, Manual=2, Multi=3, Upper=4, Lower=5) ve filtre bunları doğrudan
+*% QPDL sayfa başlığının 0x9 baytına yazar. Aynı numaralandırma upstream
+*% SpliX'in ml1910/ml2010/ml2525/ml1640/ml2510 PPD'lerinde de var; o
+*% dosyaların hepsi bu motor ailesi için yalnızca Auto ve Manual sunar
+*% (ML-2160 serisinde tek kaset + elle besleme yuvası vardır, üçüncü bir
+*% kaynak yoktur).
 *OpenUI *InputSlot/Paper Source: PickOne
 *OrderDependency: 30 AnySetup *InputSlot
 *DefaultInputSlot: Auto
-*InputSlot Auto/Auto Select: "<</MediaPosition 0>>setpagedevice"
-*InputSlot Manual/Manual Feeder: "<</MediaPosition 1>>setpagedevice"
-*InputSlot 1/Tray 1: "<</MediaPosition 2>>setpagedevice"
+*InputSlot Auto/Auto Select: "<</MediaPosition 1>>setpagedevice"
+*InputSlot Manual/Manual Feeder: "<</MediaPosition 2>>setpagedevice"
 *CloseUI: *InputSlot
 
 *% ============================================================================
 *% Media Type
 *% ============================================================================
+*% Seçenek anahtarları YAZICININ PJL sözlüğüdür: filtre seçilen değeri CUPS
+*% raster başlığındaki MediaType alanından okuyup doğrudan
+*% "@PJL SET PAPERTYPE=<anahtar>" satırına yazar. Bu yüzden anahtarlar
+*% okunabilir etiketler ("Plain", "Envelope") DEĞİL, firmware'in tanıdığı
+*% kelimelerdir; kaynak upstream SpliX'in ml1910/ml2525 PPD'lerindeki
+*% *MediaType listesidir. Tanınmayan bir değer gelirse filtre OFF'a düşer ve
+*% stderr'e uyarı yazar.
 *OpenUI *MediaType/Paper Type: PickOne
 *OrderDependency: 40 AnySetup *MediaType
-*DefaultMediaType: Plain
-*MediaType Plain/Plain Paper: "<</MediaType(Plain)>>setpagedevice"
-*MediaType Thick/Thick Paper: "<</MediaType(Thick)>>setpagedevice"
-*MediaType Thin/Thin Paper: "<</MediaType(Thin)>>setpagedevice"
-*MediaType Bond/Bond Paper: "<</MediaType(Bond)>>setpagedevice"
-*MediaType CardStock/CardStock: "<</MediaType(CardStock)>>setpagedevice"
-*MediaType Labels/Labels: "<</MediaType(Labels)>>setpagedevice"
-*MediaType Transparency/Transparency: "<</MediaType(Transparency)>>setpagedevice"
-*MediaType Envelope/Envelope: "<</MediaType(Envelope)>>setpagedevice"
-*MediaType Preprinted/Preprinted: "<</MediaType(Preprinted)>>setpagedevice"
-*MediaType Recycled/Recycled: "<</MediaType(Recycled)>>setpagedevice"
-*MediaType Archive/Archive: "<</MediaType(Archive)>>setpagedevice"
+*DefaultMediaType: OFF
+*MediaType OFF/Use Printer Default: "<</MediaType(OFF)>>setpagedevice"
+*MediaType NORMAL/Plain Paper: "<</MediaType(NORMAL)>>setpagedevice"
+*MediaType THICK/Thick Paper: "<</MediaType(THICK)>>setpagedevice"
+*MediaType THIN/Thin Paper: "<</MediaType(THIN)>>setpagedevice"
+*MediaType BOND/Bond: "<</MediaType(BOND)>>setpagedevice"
+*MediaType OHP/Transparency: "<</MediaType(OHP)>>setpagedevice"
+*MediaType CARD/Card Stock: "<</MediaType(CARD)>>setpagedevice"
+*MediaType LABEL/Labels: "<</MediaType(LABEL)>>setpagedevice"
+*MediaType USED/Preprinted: "<</MediaType(USED)>>setpagedevice"
+*MediaType COLOR/Colored Paper: "<</MediaType(COLOR)>>setpagedevice"
+*MediaType ENV/Envelope: "<</MediaType(ENV)>>setpagedevice"
+*MediaType COTTON/Cotton: "<</MediaType(COTTON)>>setpagedevice"
+*MediaType RECYCLED/Recycled: "<</MediaType(RECYCLED)>>setpagedevice"
+*MediaType ARCHIVE/Archive: "<</MediaType(ARCHIVE)>>setpagedevice"
 *CloseUI: *MediaType
 
 *% ============================================================================

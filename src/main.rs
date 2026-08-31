@@ -376,8 +376,9 @@ fn compute_page_height_lines(page_size_pt: u32, y_dpi: u32) -> u32 {
 /// `Duplex=true, Tumble=false` -> uzun kenar, `Duplex=true, Tumble=true` ->
 /// kısa kenar.
 ///
-/// Bu projenin PPD'si de OpenPrinting SpliX'in `ml2160.ppd`/`ml2165.ppd`
-/// dosyaları gibi `*QPDL ManualDuplex: "On"` bildiriyor ve ML-2160 serisinin
+/// Bu projenin PPD'si de upstream SpliX'in kardeş model PPD'leri
+/// (`ml1910.ppd`, `ml2010.ppd`, `ml2525.ppd`) gibi
+/// `*QPDL ManualDuplex: "On"` bildiriyor ve ML-2160 serisinin
 /// otomatik dupleks donanımı yok; dolayısıyla `manualDuplex` bu ailede her
 /// zaman doğrudur ve sonuç daima `Manual*` varyantlarından biridir.
 ///
@@ -403,10 +404,45 @@ fn duplex_mode(header: &PageHeader) -> SplDuplex {
     }
 }
 
+/// CUPS Raster sayfa başlığındaki `MediaType` alanını yazıcının PJL
+/// `PAPERTYPE` değerine çevirir; tanınmayan her değer `OFF`'a düşer.
+///
+/// Bu alan PPD'nin `*MediaType` seçeneğinden gelir (`<</MediaType(ENV)>>
+/// setpagedevice` -> başlıkta `MediaType = "ENV"`) ve daha önce hiç
+/// okunmuyordu: filtre her işte koşulsuz `@PJL SET PAPERTYPE=OFF` yazıyor,
+/// yani zarf/etiket/kart stoğu seçen kullanıcı düz kağıt füzer ayarlarıyla
+/// baskı alıyordu.
+///
+/// Geri düşüş SESSİZ değil: PPD ile filtrenin kelime dağarcığı ayrışırsa
+/// (ör. eski, okunabilir adlar taşıyan bir PPD hâlâ kuruluysa) bu satır
+/// kullanıcının seçiminin yazıcıya ulaşmadığını söyler.
+fn pjl_paper_type_for(header: &PageHeader) -> &'static str {
+    if header.media_type.is_empty() {
+        return spl::PJL_PAPERTYPE_DEFAULT;
+    }
+    match spl::pjl_paper_type(&header.media_type) {
+        Some(paper_type) => paper_type,
+        None => {
+            // `MediaType` 64 baytlık serbest bir C dizesidir ve işi gönderen
+            // istemciden gelir; argv'deki `title`/`user` kadar güvenilmez,
+            // bu yüzden kaçırılmış olarak basılır.
+            eprintln!(
+                "WARNING: Tanınmayan MediaType {}; @PJL SET PAPERTYPE={} gönderiliyor. \
+                 PPD'nin *MediaType anahtarları yazıcının PJL sözlüğünden olmalıdır: {}.",
+                quote_untrusted(&header.media_type),
+                spl::PJL_PAPERTYPE_DEFAULT,
+                spl::PJL_PAPER_TYPES.join(", ")
+            );
+            spl::PJL_PAPERTYPE_DEFAULT
+        }
+    }
+}
+
 /// QPDL şerit (band) yüksekliğinin temel değeri, satır cinsinden.
 ///
-/// SpliX bunu PPD'den okur (`*QPDL BandSize: "128"`); hem OpenPrinting SpliX'in
-/// `ml2160.ppd`/`ml2165.ppd` dosyaları hem de bu projenin PPD'si 128 diyor.
+/// SpliX bunu PPD'den okur (`*QPDL BandSize: "128"`); hem upstream SpliX'in
+/// kardeş model PPD'leri (`ml1910.ppd`, `ml2010.ppd`, `ml2525.ppd`,
+/// `ml1640.ppd`, `ml2510.ppd`) hem de bu projenin PPD'si 128 diyor.
 pub const QPDL_BAND_HEIGHT: usize = 128;
 
 /// Bir sayfa için kullanılacak şerit yüksekliği.
@@ -621,12 +657,22 @@ fn process_cups_raster_to_spl<W: Write>(
         None => SplDuplex::Simplex,
     };
 
+    // Kağıt türü de duplex gibi İŞ seviyesinde (PJL) bildirilir, oysa CUPS
+    // onu SAYFA başlığında taşır; bu yüzden aynı "ilk başlığı peek et"
+    // kalıbı kullanılıyor. Sayfa başına farklı bir kağıt türü QPDL'de zaten
+    // ifade edilemiyor.
+    let job_paper_type = match &next_header {
+        Some(h) => pjl_paper_type_for(h),
+        None => spl::PJL_PAPERTYPE_DEFAULT,
+    };
+
     // 2. Samsung ML-2160 serisi PJL Başlığı (@PJL ENTER LANGUAGE = QPDL)
     let job_config = JobConfig {
         job_name: args.title.clone().unwrap_or_else(|| "CUPS Document".to_string()),
         user_name: args.user.clone().unwrap_or_else(|| "guest".to_string()),
         service_date: "20120101".to_string(),
         duplex: job_duplex,
+        paper_type: job_paper_type,
     };
     spl_writer.begin_job(&job_config)?;
 
@@ -752,10 +798,32 @@ fn process_cups_raster_to_spl<W: Write>(
             }
         };
 
+        // Kağıt kaynağı, PPD'nin `*InputSlot` seçeneğinden CUPS Raster
+        // başlığının `MediaPosition` alanı üzerinden geliyor (bkz. spl.rs
+        // `SplPaperSource::from_media_position`). Bu alan daha önce hiç
+        // okunmuyor ve kaynak koşulsuz `Auto` gönderiliyordu; yani PPD'nin
+        // sunduğu "Manual Feeder" seçeneği kullanıcı için hiçbir şey
+        // yapmıyordu. Ayrım argv'deki `options` dizesinden değil başlıktan
+        // okunuyor, çünkü bağlayıcı olan başlıktır (bkz. dosya başındaki
+        // `CupsFilterArgs` notu).
+        let paper_source = match SplPaperSource::from_media_position(header.media_position) {
+            Some(source) => source,
+            None => {
+                eprintln!(
+                    "WARNING: Tanınmayan MediaPosition değeri: {}; QPDL kağıt kaynağı \
+                     Auto olarak gönderiliyor. PPD'nin *InputSlot seçenekleri QPDL \
+                     kodlarıyla numaralandırılmalıdır (1=Auto, 2=Manual, 3=Multi, \
+                     4=Upper, 5=Lower).",
+                    header.media_position
+                );
+                SplPaperSource::Auto
+            }
+        };
+
         let page_config = PageConfig {
             paper_size,
             // ELLE DUPLEX EKSİĞİ (1/2): SpliX qpdl.cpp renderPage, elle duplex
-            // modunda ön yüz geçişinde kağıt kaynağını değiştirir:
+            // modunda ön yüz geçişinde kağıt kaynağını GEÇİCİ olarak değiştirir:
             //
             //   if (tumble && !lastPage) paperSource = 3; // Multi source
             //
@@ -765,9 +833,9 @@ fn process_cups_raster_to_spl<W: Write>(
             // sayfa olup olmadığı bilinmiyor. Doğru uygulamak sayfanın tüm
             // bantlarını bellekte tamponlamayı gerektirir (en kötü durumda ~22
             // MB), ki bu yol bugün zaten erişilemez (bkz. duplex_mode).
-            // Bu yüzden kaynak her zaman Auto bırakılıyor ve sapma burada
-            // kayıt altına alınıyor.
-            paper_source: SplPaperSource::Auto,
+            // Bu sapma yalnızca ELLE DUPLEX'i etkiler; tek taraflı işlerde
+            // kaynak aşağıdaki gibi kullanıcının seçtiği tepsidir.
+            paper_source,
             // Eksenler AYRI: QPDL `header[0x1]` dikey, `header[0x10]` yatay
             // çözünürlüğü taşır (bkz. spl.rs PageConfig). `1200x600dpi` bu
             // motor ailesinde gerçek bir moddur.
@@ -934,6 +1002,19 @@ fn print_header_info(page_num: u32, header: &PageHeader) {
         if header.duplex { "Açık" } else { "Kapalı" }
     );
     eprintln!("DEBUG:   Kopya Sayısı    : {}", header.num_copies);
+    eprintln!(
+        "DEBUG:   Kağıt Kaynağı   : MediaPosition={} -> {:?}",
+        header.media_position,
+        SplPaperSource::from_media_position(header.media_position)
+    );
+    // Uyarıyı `pjl_paper_type_for` iş başlığı kurulurken bir kez basıyor;
+    // burada yalnızca eşlemenin sonucu gösteriliyor (sayfa başına tekrar
+    // eden bir uyarı üretmemek için).
+    eprintln!(
+        "DEBUG:   Kağıt Türü      : MediaType={} -> PAPERTYPE={}",
+        quote_untrusted(&header.media_type),
+        spl::pjl_paper_type(&header.media_type).unwrap_or(spl::PJL_PAPERTYPE_DEFAULT)
+    );
     eprintln!("DEBUG: --------------------------------------------------");
 }
 
@@ -1050,6 +1131,10 @@ mod tests {
         duplex: bool,
         tumble: bool,
         pages: usize,
+        /// CUPS `MediaPosition` (PPD `*InputSlot`).
+        media_position: u32,
+        /// CUPS `MediaType` (PPD `*MediaType`); boş = seçilmemiş.
+        media_type: &'static str,
     }
 
     impl RasterSpec {
@@ -1065,6 +1150,8 @@ mod tests {
                 duplex: false,
                 tumble: false,
                 pages: 1,
+                media_position: 0,
+                media_type: "",
             }
         }
 
@@ -1080,6 +1167,7 @@ mod tests {
                     buf[off..off + 4].copy_from_slice(&val.to_be_bytes());
                 };
                 put(272, self.duplex as u32);
+                put(324, self.media_position);
                 put(276, self.res_x);
                 put(280, self.res_y);
                 put(352, self.page_pt.0);
@@ -1091,6 +1179,8 @@ mod tests {
                 put(388, 1); // bits_per_pixel
                 put(392, self.bytes_per_line());
                 put(400, 3); // color_space = K
+                let media_type = self.media_type.as_bytes();
+                buf[128..128 + media_type.len()].copy_from_slice(media_type);
                 stream.extend_from_slice(&buf);
                 stream.extend_from_slice(&vec![
                     0u8;
@@ -2134,5 +2224,209 @@ mod tests {
         assert_eq!(SplPaperSize::from_dimensions_pt(935, 595), SplPaperSize::Folio);
         // 8.5x13 inç artık Folio'ya eşlenmemeli; tanınmayan ölçü A4'e düşer.
         assert_eq!(SplPaperSize::from_dimensions_pt(612, 936), SplPaperSize::A4);
+    }
+
+    // ======================================================================
+    // Kağıt kaynağı (PPD *InputSlot -> CUPS MediaPosition -> QPDL 0x9 baytı)
+    // ======================================================================
+
+    /// PPD'nin sunduğu her kağıt kaynağı, QPDL'nin doğru kaynak koduna
+    /// eşlenmeli.
+    ///
+    /// PPD `*InputSlot` seçeneklerini doğrudan QPDL kodlarıyla
+    /// numaralandırıyor (`<</MediaPosition 1>>` = Auto). Bağ bir yorum
+    /// olarak kalırsa, PPD'ye QPDL kodu olmayan bir değer eklendiğinde
+    /// (eskiden Auto = 0 idi) seçenek sessizce Auto'ya düşer.
+    #[test]
+    fn test_every_ppd_input_slot_maps_to_its_qpdl_code() {
+        use spl::SplPaperSource;
+
+        let ppd = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı");
+
+        let expected = |name: &str| -> SplPaperSource {
+            match name {
+                "Auto" => SplPaperSource::Auto,
+                "Manual" => SplPaperSource::Manual,
+                "Multi" => SplPaperSource::Multi,
+                "Upper" => SplPaperSource::Upper,
+                "Lower" => SplPaperSource::Lower,
+                other => panic!("PPD'de tabloya eklenmemiş kağıt kaynağı: {}", other),
+            }
+        };
+
+        let mut checked = 0;
+        for line in ppd.lines() {
+            let Some(rest) = line.strip_prefix("*InputSlot ") else {
+                continue;
+            };
+            let (name, code) = rest.split_once(':').expect("bozuk *InputSlot satırı");
+            let name = name.split('/').next().unwrap().trim();
+            // "<</MediaPosition 2>>setpagedevice" -> 2
+            let pos: u32 = code
+                .split("MediaPosition")
+                .nth(1)
+                .expect("MediaPosition yok")
+                .trim_start()
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap()
+                .parse()
+                .expect("MediaPosition sayı değil");
+
+            assert_eq!(
+                SplPaperSource::from_media_position(pos),
+                Some(expected(name)),
+                "PPD '{}' = MediaPosition {}, ama filtre başka bir koda eşliyor",
+                name,
+                pos
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "PPD'den beklenen sayıda kağıt kaynağı okunamadı");
+    }
+
+    /// Uçtan uca: "Manual Feeder" seçimi QPDL sayfa başlığının 0x9 baytına
+    /// ulaşmalı. Yamadan önce bu bayt koşulsuz 1 (Auto) idi.
+    #[test]
+    fn test_input_slot_reaches_qpdl_page_header() {
+        for (media_position, expected) in [(1u32, 1u8), (2, 2), (0, 1)] {
+            let mut spec = RasterSpec::a4(600, 600, 8);
+            spec.media_position = media_position;
+            let pages = parse_spl(&run_filter(spec.build()));
+            assert_eq!(
+                pages[0].header[0x9], expected,
+                "MediaPosition {} -> QPDL kaynak kodu {} olmalı",
+                media_position, expected
+            );
+        }
+    }
+
+    /// Tanınmayan bir `MediaPosition` sessizce yanlış bir koda dönüşmemeli;
+    /// Auto'ya düşmeli.
+    #[test]
+    fn test_unknown_media_position_falls_back_to_auto() {
+        use spl::SplPaperSource;
+        assert_eq!(SplPaperSource::from_media_position(6), None);
+        assert_eq!(SplPaperSource::from_media_position(u32::MAX), None);
+
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.media_position = 6;
+        let pages = parse_spl(&run_filter(spec.build()));
+        assert_eq!(pages[0].header[0x9], 1, "tanınmayan kaynak Auto'ya düşmeli");
+    }
+
+    // ======================================================================
+    // Kağıt türü (PPD *MediaType -> CUPS MediaType -> @PJL SET PAPERTYPE)
+    // ======================================================================
+
+    /// PPD'nin sunduğu HER kağıt türü anahtarı, filtre tarafından da
+    /// tanınmalı. Aksi hâlde kullanıcının seçimi sessizce `OFF`'a düşer ve
+    /// zarf/etiket düz kağıt füzer ayarlarıyla basılır.
+    #[test]
+    fn test_every_ppd_media_type_is_accepted_by_the_filter() {
+        let ppd = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı");
+
+        let mut checked = 0;
+        for line in ppd.lines() {
+            let Some(rest) = line.strip_prefix("*MediaType ") else {
+                continue;
+            };
+            let (name, code) = rest.split_once(':').expect("bozuk *MediaType satırı");
+            let name = name.split('/').next().unwrap().trim();
+
+            assert_eq!(
+                spl::pjl_paper_type(name),
+                Some(name),
+                "PPD '{}' sunuyor ama filtrenin PJL sözlüğünde yok",
+                name
+            );
+            // Seçim raster başlığına ulaşmalı: PostScript kodu MediaType
+            // dizesini anahtarın KENDİSİYLE ayarlamalı, aksi hâlde filtre
+            // farklı bir değer görür.
+            assert!(
+                code.contains(&format!("MediaType({})", name)),
+                "PPD '{}' seçimi raster başlığına aynı anahtarla ulaşmıyor: {}",
+                name,
+                line
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            spl::PJL_PAPER_TYPES.len(),
+            "PPD, yazıcının PJL sözlüğündeki türlerin tamamını sunmuyor"
+        );
+    }
+
+    /// Uçtan uca: seçilen kağıt türü PJL başlığına ulaşmalı. Yamadan önce
+    /// burada her zaman `PAPERTYPE=OFF` yazıyordu.
+    #[test]
+    fn test_media_type_reaches_pjl_papertype() {
+        for media_type in ["ENV", "LABEL", "THICK", "OFF"] {
+            let mut spec = RasterSpec::a4(600, 600, 8);
+            spec.media_type = media_type;
+            let out = run_filter(spec.build());
+            let pjl = String::from_utf8_lossy(&out[..out.len().min(512)]).into_owned();
+            assert!(
+                pjl.contains(&format!("@PJL SET PAPERTYPE={}\n", media_type)),
+                "{} PJL'e ulaşmadı: {}",
+                media_type,
+                pjl
+            );
+        }
+    }
+
+    /// Tanınmayan ya da boş bir `MediaType` güvenli varsayılana düşmeli ve
+    /// asla ham olarak PJL satırına yazılmamalı (satır tırnaksızdır: bir
+    /// boşluk ya da CR/LF komutu bozardı).
+    #[test]
+    fn test_unknown_media_type_falls_back_to_papertype_off() {
+        for media_type in ["", "Envelope", "Plain", "EVIL VALUE"] {
+            let mut spec = RasterSpec::a4(600, 600, 8);
+            spec.media_type = media_type;
+            let out = run_filter(spec.build());
+            let pjl = String::from_utf8_lossy(&out[..out.len().min(512)]).into_owned();
+            assert!(
+                pjl.contains("@PJL SET PAPERTYPE=OFF\n"),
+                "{:?} için OFF'a düşülmedi: {}",
+                media_type,
+                pjl
+            );
+            assert!(
+                !pjl.contains("PAPERTYPE=EVIL"),
+                "güvenilmez değer PJL satırına sızdı: {}",
+                pjl
+            );
+        }
+    }
+
+    /// PPD varsayılanları filtrenin varsayılanlarıyla uyuşmalı: PPD
+    /// `*DefaultMediaType: OFF` / `*DefaultInputSlot: Auto` diyorsa, hiçbir
+    /// seçim yapılmamış bir iş de aynı sonucu üretmeli.
+    #[test]
+    fn test_ppd_defaults_match_filter_defaults() {
+        let ppd = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı");
+
+        let default_of = |key: &str| -> String {
+            ppd.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .unwrap_or_else(|| panic!("{} yok", key))
+                .trim()
+                .to_string()
+        };
+        assert_eq!(default_of("*DefaultMediaType:"), spl::PJL_PAPERTYPE_DEFAULT);
+        assert_eq!(default_of("*DefaultInputSlot:"), "Auto");
     }
 }

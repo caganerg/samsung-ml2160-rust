@@ -91,6 +91,41 @@ lp -d ML2160_Rust file.pdf
 > [!NOTE]
 > Pick the device URI yourself rather than letting anything auto-detect it. CUPS device discovery is unauthenticated — over the network (mDNS/Bonjour/SNMP) and over USB (descriptor strings) alike — so any device can advertise itself as a "Samsung ML-216x" and be wired up as the print destination, silently receiving your documents over unencrypted JetDirect. Reading `lpinfo -v` and choosing the line yourself is the review step that prevents this.
 
+## Print options
+
+Beyond page size and resolution, the PPD exposes two options that the filter
+reads from the CUPS raster page header and forwards to the printer:
+
+```sh
+lp -d ML2160_Rust -o InputSlot=Manual -o MediaType=ENV envelope.pdf
+lpoptions -d ML2160_Rust -l            # list every option and its choices
+```
+
+- **`InputSlot`** — `Auto` (the cassette) or `Manual` (the manual feed slot).
+  The PPD numbers these with the QPDL paper-source codes themselves
+  (`<</MediaPosition 1>>` and `2`), which the filter writes straight into byte
+  `0x9` of the QPDL page header.
+- **`MediaType`** — `OFF`, `NORMAL`, `THICK`, `THIN`, `BOND`, `OHP`, `CARD`,
+  `LABEL`, `USED`, `COLOR`, `ENV`, `COTTON`, `RECYCLED`, `ARCHIVE`. These
+  uppercase keywords look unfriendly because they are not labels: each one is
+  the literal value sent as `@PJL SET PAPERTYPE=...`, taken from the
+  `*MediaType` list in upstream SpliX's PPDs for this engine family
+  (`ml1910.ppd`, `ml2010.ppd`, `ml2525.ppd`, `ml1640.ppd`, `ml2510.ppd`). The
+  printer picks its fuser temperature and feed speed from this, so it is worth
+  setting for envelopes, labels and card stock. `OFF` is the default and means
+  "use the printer's own setting". Anything the filter does not recognise falls
+  back to `OFF` and is reported on stderr, so a stale PPD shows up in
+  `/var/log/cups/error_log` rather than silently printing envelopes on
+  plain-paper settings.
+
+> [!IMPORTANT]
+> If you installed an earlier version of this PPD, re-run the `lpadmin` command
+> from step 4 to load the current one. The older PPD offered paper types under
+> readable names (`Plain`, `Envelope`, …) that never reached the printer, and a
+> third paper source ("Tray 1") that does not exist on this hardware. Saved
+> defaults referring to those names (`lpoptions -o MediaType=Plain`) are no
+> longer valid choices and should be set again.
+
 ## Uninstallation
 
 ### 1. Remove the queue

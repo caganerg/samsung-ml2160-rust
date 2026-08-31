@@ -76,8 +76,13 @@ impl SplPaperSize {
             // Daha önce burada 612 x 936 vardı, ki o Folio değil 8.5x13 inç,
             // yani Adobe adlandırmasıyla FanFoldGermanLegal'dir — `cupstestppd`
             // de PPD'yi tam bu gerekçeyle uyarıyordu ("Size "Folio" should be
-            // the Adobe standard name "FanFoldGermanLegal""). OpenPrinting
-            // SpliX'in ml2160.ppd/ml2165.ppd dosyaları da 595 x 935 diyor.
+            // the Adobe standard name "FanFoldGermanLegal""). Upstream
+            // SpliX'in aynı motor ailesine ait PPD'leri (ml1910.ppd,
+            // ml2010.ppd, ml2525.ppd, ml1640.ppd, ml2510.ppd) da
+            // `*PaperDimension Folio: "595 935"` diyor. DİKKAT: SpliX'te
+            // ml2160.ppd/ml2165.ppd diye bir dosya YOKTUR; bu seri upstream
+            // PPD listesinde yer almaz, bu yüzden referans olarak aynı QPDL
+            // v3 protokolünü konuşan kardeş modeller kullanılıyor.
             (595, 935) | (935, 595) => SplPaperSize::Folio,
             (516, 729) | (729, 516) => SplPaperSize::B5,
             (297, 684) | (684, 297) => SplPaperSize::Env10,
@@ -109,6 +114,34 @@ pub enum SplPaperSource {
     Multi = 3,
     Upper = 4,
     Lower = 5,
+}
+
+impl SplPaperSource {
+    /// CUPS Raster başlığındaki `MediaPosition` alanını QPDL kağıt kaynağı
+    /// koduna eşler; tanınmayan her değer için `None` döner.
+    ///
+    /// Eşleme birebirdir, çünkü bu projenin PPD'si `*InputSlot` seçeneklerini
+    /// doğrudan QPDL kodlarıyla numaralandırır (`<</MediaPosition 1>>` = Auto,
+    /// `<</MediaPosition 2>>` = Manual). Aynı numaralandırmayı upstream
+    /// SpliX'in ml1910.ppd / ml2010.ppd / ml2525.ppd / ml1640.ppd /
+    /// ml2510.ppd dosyaları da kullanır. Bağı bir yorum olarak bırakmamak
+    /// için `test_every_ppd_input_slot_maps_to_its_qpdl_code` PPD'yi
+    /// ayrıştırıp her seçeneğin beklenen koda düştüğünü doğrular.
+    ///
+    /// `0`, "hiçbir kaynak seçilmedi" demektir (PPD'siz üretilmiş bir raster,
+    /// ör. `cupsfilter -p` olmadan) ve sessizce `Auto`'ya düşer — bu bir
+    /// sapma değil, alanın yokluğudur. Tanınmayan DİĞER değerler `None`
+    /// döner ki çağıran taraf uyarabilsin.
+    pub fn from_media_position(media_position: u32) -> Option<Self> {
+        Some(match media_position {
+            0 | 1 => SplPaperSource::Auto,
+            2 => SplPaperSource::Manual,
+            3 => SplPaperSource::Multi,
+            4 => SplPaperSource::Upper,
+            5 => SplPaperSource::Lower,
+            _ => return None,
+        })
+    }
 }
 
 /// Çözünürlük
@@ -154,8 +187,9 @@ impl SplResolution {
 /// else _duplex = Simplex;
 /// ```
 ///
-/// ML-2160 serisinin otomatik duplex donanımı YOKTUR: hem OpenPrinting
-/// SpliX'in `ml2160.ppd`/`ml2165.ppd` dosyaları hem de bu projenin PPD'si
+/// ML-2160 serisinin otomatik duplex donanımı YOKTUR: hem upstream SpliX'in
+/// kardeş model PPD'leri (`ml1910.ppd`, `ml2010.ppd`, `ml2525.ppd`,
+/// `ml1640.ppd`, `ml2510.ppd`) hem de bu projenin PPD'si
 /// `*QPDL ManualDuplex: "On"` diyor. Dolayısıyla bu yazıcı ailesinde gerçekte
 /// yalnızca `Simplex` ve `Manual*` varyantları tetiklenir; `LongEdge` ve
 /// `ShortEdge` aynı QPDL v3 protokolünü konuşan otomatik duplekserli modeller
@@ -179,6 +213,47 @@ pub enum SplCompression {
     Rle = 0x11,
 }
 
+/// Yazıcının `@PJL SET PAPERTYPE` için tanıdığı kelime dağarcığı.
+///
+/// Kaynak, upstream SpliX'in aynı motor ailesine ait PPD'lerindeki
+/// `*MediaType` seçenek anahtarlarıdır (ml1910.ppd, ml2010.ppd, ml2525.ppd,
+/// ml1640.ppd, ml2510.ppd — beşi de birebir aynı listeyi veriyor). SpliX bu
+/// anahtarı PPD'den okuyup `@PJL SET PAPERTYPE=%s` satırına olduğu gibi
+/// yazar (printer.cpp sendPJLHeader), yani anahtarın kendisi protokol
+/// değeridir; okunabilir bir etiket değildir.
+///
+/// `OFF` = "yazıcının kendi varsayılanını kullan" ve listenin ilk üyesidir;
+/// `PJL_PAPERTYPE_DEFAULT` buna işaret eder.
+pub const PJL_PAPER_TYPES: [&str; 14] = [
+    "OFF", "NORMAL", "THICK", "THIN", "BOND", "OHP", "CARD", "LABEL", "USED", "COLOR", "ENV",
+    "COTTON", "RECYCLED", "ARCHIVE",
+];
+
+/// Kağıt türü bilinmediğinde ya da tanınmadığında kullanılan PJL değeri.
+pub const PJL_PAPERTYPE_DEFAULT: &str = PJL_PAPER_TYPES[0];
+
+/// Serbest metin bir kağıt türü adını, yazıcının tanıdığı PJL değerine eşler.
+///
+/// Değer CUPS Raster başlığındaki `MediaType` alanından, yani işi gönderen
+/// istemciden gelir ve GÜVENİLMEZDİR; bu yüzden metin doğrudan PJL satırına
+/// yazılmaz, yalnızca tabloya eşlenir. Dönüş tipi `&'static str` olduğu için
+/// PJL satırına yalnızca yukarıdaki sabitlerden biri girebilir: keyfi bir
+/// dizenin (boşluk, CR/LF, ESC) satıra sızması tip düzeyinde imkânsızdır.
+/// `PAPERTYPE` değeri `JOBNAME`/`USERNAME` gibi tırnak içinde taşınmadığı
+/// için bu ayrım önemli — orada `sanitize_pjl_field` yeterliyken burada tek
+/// bir boşluk bile satırı bozardı.
+///
+/// Karşılaştırma ASCII'de büyük/küçük harfe duyarsızdır: PPD anahtarları
+/// büyük harfli, ama elle düzenlenmiş bir PPD'nin `env` yazması sessiz bir
+/// geri düşüşe yol açmasın.
+pub fn pjl_paper_type(name: &str) -> Option<&'static str> {
+    let name = name.trim();
+    PJL_PAPER_TYPES
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))
+        .copied()
+}
+
 /// İş Konfigürasyonu
 #[derive(Debug, Clone)]
 pub struct JobConfig {
@@ -186,6 +261,12 @@ pub struct JobConfig {
     pub user_name: String,
     pub service_date: String,
     pub duplex: SplDuplex,
+    /// `@PJL SET PAPERTYPE` değeri.
+    ///
+    /// `String` değil `&'static str`: bkz. `pjl_paper_type`. Alan yalnızca
+    /// `PJL_PAPER_TYPES` tablosundaki sabitlerden birini taşıyabildiği için,
+    /// güvenilmez bir kağıt türü adının PJL satırına sızması mümkün değil.
+    pub paper_type: &'static str,
 }
 
 impl Default for JobConfig {
@@ -195,6 +276,7 @@ impl Default for JobConfig {
             user_name: "guest".to_string(),
             service_date: "20120101".to_string(),
             duplex: SplDuplex::Simplex,
+            paper_type: PJL_PAPERTYPE_DEFAULT,
         }
     }
 }
@@ -679,8 +761,9 @@ impl<W: Write> SplStreamWriter<W> {
     pub fn begin_job(&mut self, config: &JobConfig) -> io::Result<()> {
         // Gerçek SpliX (printer.cpp sendPJLHeader) sırası: UEL'den sonra doğrudan
         // "@PJL DEFAULT SERVICEDATE=..." ile başlar; ayrı bir çıplak "@PJL\n" satırı
-        // GÖNDERİLMEZ. PowerSave/JamRecovery satırları da ml2160.ppd varsayılanlarına
-        // göre (PowerSave=5, JamRecovery=False) her zaman gönderilir.
+        // GÖNDERİLMEZ. PowerSave/JamRecovery satırları da bu projenin PPD
+        // varsayılanlarına göre (PowerSave=5, JamRecovery=False) her zaman
+        // gönderilir.
         let mut pjl = Vec::with_capacity(256);
         pjl.extend_from_slice(PJL_UEL);
         pjl.extend_from_slice(
@@ -735,7 +818,13 @@ impl<W: Write> SplStreamWriter<W> {
             }
         }
 
-        pjl.extend_from_slice(b"@PJL SET PAPERTYPE=OFF\n");
+        // SpliX printer.cpp sendPJLHeader, PPD'de bir `*MediaType` seçeneği
+        // varsa onun anahtarını `@PJL SET PAPERTYPE=%s` olarak gönderir,
+        // yoksa `OFF` yazar. Bu filtre seçeneği PPD'den değil CUPS Raster
+        // sayfa başlığındaki `MediaType` alanından okur (bkz. main.rs
+        // `pjl_paper_type_for`); `config.paper_type` oraya kadar `&'static
+        // str` olarak geldiği için burada ek bir süzgeç gerekmiyor.
+        pjl.extend_from_slice(format!("@PJL SET PAPERTYPE={}\n", config.paper_type).as_bytes());
         pjl.extend_from_slice(b"@PJL SET ALTITUDE=LOW\n");
         pjl.extend_from_slice(b"@PJL SET DENSITY=3\n");
         pjl.extend_from_slice(b"@PJL SET RET=NORMAL\n");
@@ -1180,6 +1269,7 @@ mod tests {
             user_name: "Ö".repeat(400),
             service_date: "20120101".to_string(),
             duplex: SplDuplex::Simplex,
+            paper_type: PJL_PAPERTYPE_DEFAULT,
         };
         let mut out: Vec<u8> = Vec::new();
         {
@@ -1207,12 +1297,14 @@ mod tests {
             user_name: "attacker\x1b%-12345X@PJL SET JOBNAME=\"hijacked".to_string(),
             service_date: "20120101".to_string(),
             duplex: SplDuplex::Simplex,
+            paper_type: PJL_PAPERTYPE_DEFAULT,
         };
         let benign = JobConfig {
             job_name: "Benign".to_string(),
             user_name: "benign".to_string(),
             service_date: "20120101".to_string(),
             duplex: SplDuplex::Simplex,
+            paper_type: PJL_PAPERTYPE_DEFAULT,
         };
 
         // İşler açıkça kapatılır: writer düşerken `Drop` kapanış UEL'ini
@@ -1366,6 +1458,77 @@ mod tests {
             SplStreamWriter::new(&mut o).begin_page(&sym).unwrap();
             assert_eq!(o[0x1], o[0x10]);
             assert_eq!(o[0x1] as u32, dpi.dpi() / 100);
+        }
+    }
+
+    /// QPDL kağıt kaynağı kodları (SpliX printer.cpp) birebir taşınmalı;
+    /// `0` "seçilmedi" demektir ve Auto'ya düşer, tanınmayan değerler ise
+    /// sessizce bir koda dönüşmek yerine `None` verir.
+    #[test]
+    fn test_paper_source_from_media_position() {
+        assert_eq!(SplPaperSource::from_media_position(0), Some(SplPaperSource::Auto));
+        assert_eq!(SplPaperSource::from_media_position(1), Some(SplPaperSource::Auto));
+        assert_eq!(SplPaperSource::from_media_position(2), Some(SplPaperSource::Manual));
+        assert_eq!(SplPaperSource::from_media_position(3), Some(SplPaperSource::Multi));
+        assert_eq!(SplPaperSource::from_media_position(4), Some(SplPaperSource::Upper));
+        assert_eq!(SplPaperSource::from_media_position(5), Some(SplPaperSource::Lower));
+        for unknown in [6u32, 7, 99, u32::MAX] {
+            assert_eq!(SplPaperSource::from_media_position(unknown), None, "{}", unknown);
+        }
+        // Kodlar QPDL sayfa başlığına ham olarak yazıldığı için sayısal
+        // değerleri de sabitlensin.
+        assert_eq!(SplPaperSource::Auto as u8, 1);
+        assert_eq!(SplPaperSource::Manual as u8, 2);
+    }
+
+    /// PJL sözlüğü dışında hiçbir şey `PAPERTYPE` değerine dönüşemez.
+    #[test]
+    fn test_pjl_paper_type_only_accepts_printer_vocabulary() {
+        for known in PJL_PAPER_TYPES {
+            assert_eq!(pjl_paper_type(known), Some(known));
+            // ASCII büyük/küçük harf farkı geri düşüşe yol açmamalı.
+            assert_eq!(pjl_paper_type(&known.to_ascii_lowercase()), Some(known));
+            // Baştaki/sondaki boşluklar (64 baytlık C dizesi) tolere edilmeli.
+            assert_eq!(pjl_paper_type(&format!("  {}  ", known)), Some(known));
+        }
+        // Eski, okunabilir PPD adları artık protokol değeri değil.
+        for unknown in ["", "Plain", "Envelope", "CardStock", "NORMAL\nEVIL", "EN V"] {
+            assert_eq!(pjl_paper_type(unknown), None, "{:?} kabul edildi", unknown);
+        }
+    }
+
+    /// `PAPERTYPE` satırı TIRNAKSIZDIR: değere yalnızca tablodaki sabitler
+    /// girebildiği için satır hiçbir girdiyle bozulamaz.
+    #[test]
+    fn test_begin_job_emits_papertype_from_config() {
+        for paper_type in PJL_PAPER_TYPES {
+            let cfg = JobConfig {
+                paper_type,
+                ..JobConfig::default()
+            };
+            let mut out: Vec<u8> = Vec::new();
+            {
+                let mut w = SplStreamWriter::new(&mut out);
+                w.begin_job(&cfg).unwrap();
+                w.end_job().unwrap();
+            }
+            let text = String::from_utf8_lossy(&out).into_owned();
+            assert!(
+                text.contains(&format!("@PJL SET PAPERTYPE={}\n", paper_type)),
+                "{} yazılmadı: {}",
+                paper_type,
+                text
+            );
+            // Satır sayısı sabit kalmalı: değer hiçbir zaman satır bölmez.
+            // Simplex bir işte 12 satır var: SERVICEDATE, USERNAME, JOBNAME,
+            // POWERSAVE, POWERSAVETIME, JAMRECOVERY, DUPLEX, PAPERTYPE,
+            // ALTITUDE, DENSITY, RET, ENTER LANGUAGE.
+            assert_eq!(
+                out.iter().filter(|&&b| b == b'\n').count(),
+                12,
+                "PJL satır sayısı değişti ({})",
+                paper_type
+            );
         }
     }
 
