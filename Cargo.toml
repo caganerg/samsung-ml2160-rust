@@ -1,6 +1,6 @@
 [package]
 name = "samsung-2160-rust"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 authors = ["CUPS Raster Filter Developer"]
 description = "CUPS/PWG Raster Filter for Linux printing architecture"
