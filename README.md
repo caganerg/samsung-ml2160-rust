@@ -217,6 +217,18 @@ lpoptions -d ML2160_Rust -l            # list every option and its choices
   `/var/log/cups/error_log` rather than silently printing envelopes on
   plain-paper settings.
 
+> [!NOTE]
+> The filter accepts only the page sizes and resolutions this PPD declares. A
+> page geometry outside the `*PaperDimension` table, or a resolution pair other
+> than 300x300, 600x600, 1200x600 and 1200x1200, fails the job with an
+> `ERROR: … Desteklenmeyen …` line in `/var/log/cups/error_log` instead of
+> printing (the filter's diagnostics are in Turkish). Earlier versions silently
+> substituted A4 and rounded the resolution down, which sent the printer a paper
+> code and a DPI that did not match the raster geometry it was being handed —
+> misaligned output, or a feed from the wrong tray. If a job fails this way, the
+> queue is almost certainly using a different PPD than the one in
+> `ppd/samsung-ml2160.ppd`; re-run the `lpadmin` command from step 4.
+
 > [!IMPORTANT]
 > If you installed an earlier version of this PPD, re-run the `lpadmin` command
 > from step 4 to load the current one. The older PPD offered paper types under

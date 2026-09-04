@@ -514,7 +514,7 @@ const MAX_PAGES_PER_JOB: u32 = 1_000;
 ///
 /// GİRDİ BOYUTUNDAN BAĞIMSIZLIK: bu bütçe ÇÖZÜLMÜŞ raster hacmini sayar,
 /// girdi hacmini değil. CUPS Raster v2'nin satır-RLE'siyle, desteklenen en
-/// büyük geometride (Legal @1200 DPI => 1225 B/satır x 16.800 satır) yaklaşık
+/// büyük geometride (Legal @1200 DPI => 1275 B/satır x 16.800 satır) yaklaşık
 /// 11.000 kat genişleme mümkündür. Yaklaşık 0,74 MiB'lik tamamen beyaz bir
 /// akış bile 8 GiB'tan fazla raster işi doğurabilir; tek gerçek savunma
 /// çözülen verinin tavanını doğrudan sınırlamaktır.
@@ -523,8 +523,8 @@ const MAX_PAGES_PER_JOB: u32 = 1_000;
 ///
 /// * @600 DPI'da ölçülen A4 sayfa 595 x 6817 = ~3,87 MiB'dir;
 ///   `MAX_PAGES_PER_JOB` kadarı (1.000 sayfa) ~3,78 GiB eder, yani bütçenin
-///   yarısının altında kalır. Sayfa
-///   sınırına kadar olan hiçbir normal çözünürlüklü iş bu kontrole TAKILMAZ.
+///   yarısının altında kalır. Sayfa sınırına kadar olan hiçbir normal
+///   çözünürlüklü iş bu kontrole TAKILMAZ.
 /// * En büyük kabul edilebilir sayfada (~20,43 MiB) bütçe 402. sayfada
 ///   devreye girer ve ölçülen en kötü sıkıştırma hızında işi yaklaşık 22
 ///   dakikayla sınırlar.
