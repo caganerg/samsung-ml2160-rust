@@ -1,6 +1,10 @@
 pub mod raster;
 pub mod spl;
 
+/// Altın dosya (golden file) koşum takımı; bkz. `src/golden.rs`.
+#[cfg(test)]
+mod golden;
+
 use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
@@ -135,7 +139,9 @@ fn main() {
     // uygulaması kapanış UEL'ini yazar. `process::exit` `Drop` çalıştırmadığı
     // için sıralama önemlidir — hata burada, writer çoktan düştükten sonra
     // raporlanır.
-    if let Err(err) = process_cups_raster_to_spl(&args, input_reader, io::stdout()) {
+    if let Err(err) =
+        process_cups_raster_to_spl(&args, input_reader, io::stdout(), &current_service_date())
+    {
         eprintln!("ERROR: Raster işleme hatası: {}", err);
         process::exit(1);
     }
@@ -746,10 +752,19 @@ fn sanitize_copies(num_copies: u32) -> u16 {
 /// `writer` parametre olarak alınır (doğrudan `io::stdout()` kullanılmaz) ki
 /// testler üretilen SPL akışını inceleyebilsin; özellikle hata yollarında
 /// kapanış UEL'inin yazıldığını doğrulamak için gerekli.
+///
+/// `service_date` de aynı gerekçeyle DIŞARIDAN veriliyor (doğrudan
+/// `current_service_date()` çağrılmıyor): `@PJL DEFAULT SERVICEDATE` satırı
+/// bugünün tarihini taşıdığı için üretilen akış saate bağımlı olurdu ve
+/// altın dosya (golden file) karşılaştırması her gece yarısı kırılırdı.
+/// Tarihi sabitlemek yerine karşılaştırmayı gevşetmek, gerçek sapmaları da
+/// gizlerdi; bkz. `src/golden.rs`. `main` yine `current_service_date()`
+/// geçiyor, yani çalışma zamanı davranışı değişmiyor.
 fn process_cups_raster_to_spl<W: Write>(
     args: &CupsFilterArgs,
     reader: Box<dyn Read>,
     writer: W,
+    service_date: &str,
 ) -> io::Result<()> {
     // 1. CUPS Raster başlık/magic kontrolü (RaSt, RaS2, RaS3 vb.)
     let mut raster_reader = CupsRasterReader::new(reader)?;
@@ -793,7 +808,7 @@ fn process_cups_raster_to_spl<W: Write>(
             .clone()
             .unwrap_or_else(|| "CUPS Document".to_string()),
         user_name: args.user.clone().unwrap_or_else(|| "guest".to_string()),
-        service_date: current_service_date(),
+        service_date: service_date.to_string(),
         duplex: job_duplex,
         paper_type: job_paper_type,
     };
@@ -1549,8 +1564,13 @@ mod tests {
 
     fn run_filter(stream: Vec<u8>) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
-        process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(stream)), &mut out)
-            .expect("filtre geçerli akışı işleyemedi");
+        process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(stream)),
+            &mut out,
+            &current_service_date(),
+        )
+        .expect("filtre geçerli akışı işleyemedi");
         out
     }
 
@@ -1569,8 +1589,13 @@ mod tests {
     fn test_closing_uel_written_on_truncated_page_data() {
         let stream = v3_stream(2); // 4 satır x 4 bayt = 16 bayt gerekiyordu
         let mut out: Vec<u8> = Vec::new();
-        let err = process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(stream)), &mut out)
-            .expect_err("kısa sayfa verisi hata döndürmeliydi");
+        let err = process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(stream)),
+            &mut out,
+            &current_service_date(),
+        )
+        .expect_err("kısa sayfa verisi hata döndürmeliydi");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
         assert!(
             out.ends_with(spl::PJL_END),
@@ -1587,8 +1612,13 @@ mod tests {
         stream[4 + 392..4 + 396].copy_from_slice(&0u32.to_be_bytes());
 
         let mut out: Vec<u8> = Vec::new();
-        let err = process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(stream)), &mut out)
-            .expect_err("geçersiz başlık hata döndürmeliydi");
+        let err = process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(stream)),
+            &mut out,
+            &current_service_date(),
+        )
+        .expect_err("geçersiz başlık hata döndürmeliydi");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(out.ends_with(spl::PJL_END));
     }
@@ -1602,6 +1632,7 @@ mod tests {
             &no_args(),
             Box::new(Cursor::new(b"RaS3".to_vec())),
             &mut out,
+            &current_service_date(),
         )
         .expect("sayfasız akış hata değil, uyarı üretmeli");
         assert!(out.ends_with(spl::PJL_END));
@@ -1613,8 +1644,13 @@ mod tests {
     #[test]
     fn test_successful_stream_has_exactly_one_uel_pair() {
         let mut out: Vec<u8> = Vec::new();
-        process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(v3_stream(16))), &mut out)
-            .expect("geçerli akış başarılı olmalı");
+        process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(v3_stream(16))),
+            &mut out,
+            &current_service_date(),
+        )
+        .expect("geçerli akış başarılı olmalı");
         assert!(out.starts_with(spl::PJL_UEL));
         assert!(out.ends_with(spl::PJL_END));
         assert_eq!(count_uel(&out), 2, "fazladan UEL yazıldı");
@@ -1666,11 +1702,21 @@ mod tests {
         v2.extend_from_slice(&[0x00, 0x03, 0xFF]); // 0xFF x4
 
         let mut out_v3: Vec<u8> = Vec::new();
-        process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(v3)), &mut out_v3)
-            .expect("v3 akışı işlenmeli");
+        process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(v3)),
+            &mut out_v3,
+            &current_service_date(),
+        )
+        .expect("v3 akışı işlenmeli");
         let mut out_v2: Vec<u8> = Vec::new();
-        process_cups_raster_to_spl(&no_args(), Box::new(Cursor::new(v2)), &mut out_v2)
-            .expect("v2 akışı işlenmeli");
+        process_cups_raster_to_spl(
+            &no_args(),
+            Box::new(Cursor::new(v2)),
+            &mut out_v2,
+            &current_service_date(),
+        )
+        .expect("v2 akışı işlenmeli");
 
         assert!(!out_v3.is_empty());
         assert_eq!(out_v2, out_v3, "v2 ve v3 çıktıları ayrıştı");
@@ -2188,6 +2234,7 @@ mod tests {
             &no_args(),
             Box::new(Cursor::new(v3_multipage_stream(MAX_PAGES_PER_JOB + 1))),
             &mut out,
+            &current_service_date(),
         )
         .expect_err("sayfa sınırı aşılınca hata beklenir");
         assert!(err.to_string().contains("sayfa sınırını aştı"), "{}", err);
@@ -2295,6 +2342,7 @@ mod tests {
                 MAX_REALISTIC_COPIES as u32,
             ))),
             &mut out,
+            &current_service_date(),
         )
         .expect_err("yaprak sınırı aşılınca hata beklenir");
         assert!(err.to_string().contains("yaprak sınırını aştı"), "{}", err);
@@ -2430,6 +2478,7 @@ mod tests {
             &no_args(),
             Box::new(Cursor::new(v3_multipage_stream(MAX_PAGES_PER_JOB))),
             &mut out,
+            &current_service_date(),
         )
         .expect("tam sınır kadar sayfa kabul edilmeli");
         assert!(out.ends_with(spl::PJL_END));
