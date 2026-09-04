@@ -218,16 +218,19 @@ lpoptions -d ML2160_Rust -l            # list every option and its choices
   plain-paper settings.
 
 > [!NOTE]
-> The filter accepts only the page sizes and resolutions this PPD declares. A
-> page geometry outside the `*PaperDimension` table, or a resolution pair other
-> than 300x300, 600x600, 1200x600 and 1200x1200, fails the job with an
-> `ERROR: … Desteklenmeyen …` line in `/var/log/cups/error_log` instead of
-> printing (the filter's diagnostics are in Turkish). Earlier versions silently
-> substituted A4 and rounded the resolution down, which sent the printer a paper
-> code and a DPI that did not match the raster geometry it was being handed —
-> misaligned output, or a feed from the wrong tray. If a job fails this way, the
-> queue is almost certainly using a different PPD than the one in
-> `ppd/samsung-ml2160.ppd`; re-run the `lpadmin` command from step 4.
+> The filter accepts only the page sizes and resolutions this PPD declares
+> (paper dimensions may also have their width and height swapped for landscape).
+> A page geometry that matches neither a `*PaperDimension` entry nor its
+> landscape rotation, or a resolution pair other than 300x300, 600x600,
+> 1200x600 and 1200x1200, fails the job with an `ERROR: … Desteklenmeyen …`
+> line in `/var/log/cups/error_log` instead of printing (the filter's diagnostics
+> are in Turkish). Earlier versions substituted A4 while logging a warning and
+> coerced each unsupported resolution axis independently to 300, 600 or 1200
+> DPI. That could send the printer a paper code or DPI that did not match the
+> raster geometry it was being handed — misaligned output, or a feed from the
+> wrong tray. Such a failure usually means that the queue is using a different
+> PPD than `ppd/samsung-ml2160.ppd`, or that it received a malformed raster
+> stream; first re-run the `lpadmin` command from step 4 to confirm the PPD.
 
 > [!IMPORTANT]
 > If you installed an earlier version of this PPD, re-run the `lpadmin` command

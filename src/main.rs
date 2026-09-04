@@ -183,6 +183,14 @@ pub const MAX_BYTES_PER_LINE: u32 = 4096;
 /// ~1300 pt * 1200 dpi / 72 ≈ 21.667 satır; yuvarlanıp pay bırakıldı.
 pub const MAX_LINES: u32 = 24_000;
 
+/// Fiziksel sayfa genişliğinin üzerinde kabul edilen yuvarlama payı.
+/// Gerekçe için `validate_page_header` içindeki D-01 açıklamasına bakın.
+const LINE_OVERSHOOT_SLACK_BYTES: u32 = 1;
+
+/// Fiziksel sayfa yüksekliğinin üzerinde kabul edilen yuvarlama payı.
+/// Gerekçe için `validate_page_header` içindeki D-02 açıklamasına bakın.
+const HEIGHT_OVERSHOOT_SLACK_LINES: u32 = 8;
+
 fn validate_page_header(header: &PageHeader) -> io::Result<()> {
     // Sınırlar keyfi değil: ppd/samsung-ml2160.ppd'nin tanımladığı en yüksek
     // çözünürlükten ve en büyük kağıttan türetildi, makul bir pay bırakıldı.
@@ -292,7 +300,6 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
     // sağlanır; 1 baytlık pay yalnızca üretici tarafın farklı yuvarlaması
     // ihtimalini karşılar. Bu payın içinde kalan sapma, aşağıdaki sayfa
     // döngüsünde uyarıyla birlikte kırpılmaya devam eder.
-    const LINE_OVERSHOOT_SLACK_BYTES: u32 = 1;
     let band_width_bytes =
         compute_page_width_pixels(header.page_size_points[0], header.hw_resolution[0]).div_ceil(8);
     if header.bytes_per_line > band_width_bytes + LINE_OVERSHOOT_SLACK_BYTES {
@@ -326,7 +333,6 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
     // 7017 satıra karşılık bu sistemde ölçülen `cupsHeight` 6817'dir (12 pt
     // üst + 12 pt alt yaklaşık 200 satır eksiltir). Yani meşru hiçbir iş bu
     // kontrole takılmaz.
-    const HEIGHT_OVERSHOOT_SLACK_LINES: u32 = 8;
     let page_height_lines =
         compute_page_height_lines(header.page_size_points[1], header.hw_resolution[1]);
     if header.height > page_height_lines + HEIGHT_OVERSHOOT_SLACK_LINES {
@@ -513,11 +519,12 @@ const MAX_PAGES_PER_JOB: u32 = 1_000;
 /// durum kabul edilebilir kalacak şekilde seçilmelidir.
 ///
 /// GİRDİ BOYUTUNDAN BAĞIMSIZLIK: bu bütçe ÇÖZÜLMÜŞ raster hacmini sayar,
-/// girdi hacmini değil. CUPS Raster v2'nin satır-RLE'siyle, desteklenen en
-/// büyük geometride (Legal @1200 DPI => 1275 B/satır x 16.800 satır) yaklaşık
-/// 11.000 kat genişleme mümkündür. Yaklaşık 0,74 MiB'lik tamamen beyaz bir
-/// akış bile 8 GiB'tan fazla raster işi doğurabilir; tek gerçek savunma
-/// çözülen verinin tavanını doğrudan sınırlamaktır.
+/// girdi hacmini değil. CUPS Raster v2'nin satır-RLE'siyle, doğrulayıcının
+/// kabul ettiği en büyük geometride (Legal @1200 DPI, yuvarlama paylarıyla
+/// 1276 B/satır x 16.808 satır) yaklaşık 11.100 kat genişleme mümkündür.
+/// Yaklaşık 0,74 MiB'lik tamamen beyaz bir akış bile 8 GiB'tan fazla raster
+/// işi doğurabilir; tek gerçek savunma çözülen verinin tavanını doğrudan
+/// sınırlamaktır.
 ///
 /// 8 GiB, iki sınırın da anlamlı kalacağı şekilde seçildi:
 ///
@@ -525,7 +532,7 @@ const MAX_PAGES_PER_JOB: u32 = 1_000;
 ///   `MAX_PAGES_PER_JOB` kadarı (1.000 sayfa) ~3,78 GiB eder, yani bütçenin
 ///   yarısının altında kalır. Sayfa sınırına kadar olan hiçbir normal
 ///   çözünürlüklü iş bu kontrole TAKILMAZ.
-/// * En büyük kabul edilebilir sayfada (~20,43 MiB) bütçe 402. sayfada
+/// * En büyük kabul edilebilir sayfada (~20,45 MiB) bütçe 401. sayfada
 ///   devreye girer ve ölçülen en kötü sıkıştırma hızında işi yaklaşık 22
 ///   dakikayla sınırlar.
 const MAX_JOB_RASTER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -1938,20 +1945,23 @@ mod tests {
         );
     }
 
-    /// PPD'nin sunduğu en büyük kâğıdın (Legal) en yüksek doğrulanmış moddaki
-    /// ham raster hacmi. Bilinmeyen ölçüler artık kabul edilmediğinden global
-    /// `MAX_POINTS` değeri erişilebilir bir sayfa geometrisi değildir.
-    fn largest_supported_page_bytes() -> u64 {
-        let bytes_per_line = compute_page_width_pixels(612, 1200).div_ceil(8) as u64;
-        let lines = compute_page_height_lines(1008, 1200) as u64;
-        bytes_per_line * lines
+    /// Doğrulayıcının kabul ettiği en büyük ham raster geometrisi:
+    /// Legal @1200 DPI ile D-01/D-02 yuvarlama payları. Bilinmeyen ölçüler
+    /// artık kabul edilmediğinden global `MAX_POINTS` değeri erişilebilir bir
+    /// sayfa geometrisi değildir.
+    fn largest_accepted_page_geometry() -> (u64, u64) {
+        let bytes_per_line = compute_page_width_pixels(612, 1200).div_ceil(8) as u64
+            + LINE_OVERSHOOT_SLACK_BYTES as u64;
+        let lines =
+            compute_page_height_lines(1008, 1200) as u64 + HEIGHT_OVERSHOOT_SLACK_LINES as u64;
+        (bytes_per_line * lines, lines)
     }
 
     /// ...ama en büyük kabul edilebilir sayfada GERÇEKTEN devreye girmeli,
     /// yoksa sayfa sınırının çözünürlük körlüğü kapanmamış olur.
     #[test]
     fn test_job_budget_binds_before_page_limit_at_max_page_size() {
-        let max_page = largest_supported_page_bytes();
+        let (max_page, _) = largest_accepted_page_geometry();
         let pages_allowed = MAX_JOB_RASTER_BYTES / max_page;
         assert!(
             pages_allowed > 0,
@@ -1963,6 +1973,11 @@ mod tests {
              (izin verilen: {}, sayfa sınırı: {})",
             pages_allowed,
             MAX_PAGES_PER_JOB
+        );
+        assert_eq!(
+            pages_allowed + 1,
+            401,
+            "kaynak bütçesi açıklamasındaki ilk reddedilen sayfa değişti"
         );
     }
 
@@ -2004,8 +2019,7 @@ mod tests {
     fn test_compressed_input_cannot_amplify_past_the_raster_budget() {
         // Tek bir v2 satır kaydı 2 bayttır ([tekrar][0x80 = satır sonuna kadar
         // boşalt]) ve 256 satıra kadar üretir; sayfa başlığı 1796 bayt.
-        let page = largest_supported_page_bytes();
-        let lines = compute_page_height_lines(1008, 1200) as u64;
+        let (page, lines) = largest_accepted_page_geometry();
         let input_per_page = 1796 + 2 * lines.div_ceil(256);
         let pages = MAX_JOB_RASTER_BYTES / page + 1;
         let attacker_bytes = pages * input_per_page;
