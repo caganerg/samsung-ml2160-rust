@@ -1,6 +1,10 @@
 # samsung-ml2160-rust
-> [!WARNING]
-> **Experimental Driver:** This project is currently in active development and should be considered experimental. Use at your own risk. Feedback, bug reports, and pull requests are highly appreciated!
+> ### 🚀 Project Status: Stable & Complete (`v1.0.2`)
+> This driver is **production-ready**, feature-complete, and actively verified on Debian Linux. No further major development is planned as the core SPL rasterization and PJL command stack are fully functional and stable.
+>
+> 🧪 **Community Testing & Feedback Wanted:**
+> While primarily verified on the **Samsung ML-2160** series, this driver should theoretically support other SPL-based Samsung / SPL-compatible monochrome laser printers. 
+> - If you test this driver on a different printer model, please **[open an Issue](https://github.com/USERNAME/REPO_NAME/issues)** or submit a PR to report your results (positive or negative) so we can expand the tested hardware list!
 
 A CUPS raster filter (`rastertospl-rust`) for Samsung ML-2160 series monochrome laser printers, written in Rust. It converts CUPS's standard raster stream (`RaSt`/`RaS2`/`RaS3`) into the printer's native binary **SPL2 / QPDL v3** format: PJL job envelope, 17-byte page header, Algo 0x11 RLE-compressed band records, and checksums.
 
