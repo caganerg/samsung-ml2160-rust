@@ -24,6 +24,7 @@ use spl::{
 /// verisi ona göre üretilmiştir. Buradan seçenek okumak, üretilen veriyle
 /// çelişen bir başlık yazmak anlamına gelirdi.
 #[allow(dead_code)]
+#[derive(Default)]
 struct CupsFilterArgs {
     pub job_id: Option<String>,
     pub user: Option<String>,
@@ -47,22 +48,11 @@ impl CupsFilterArgs {
         } else if args.len() == 2 && !args[1].starts_with('-') {
             // Doğrudan dosya modu: `cargo run -- dosya.raster`
             Self {
-                job_id: None,
-                user: None,
-                title: None,
-                num_copies: None,
-                options: None,
                 filename: Some(args[1].clone()),
+                ..Self::default()
             }
         } else {
-            Self {
-                job_id: None,
-                user: None,
-                title: None,
-                num_copies: None,
-                options: None,
-                filename: None,
-            }
+            Self::default()
         }
     }
 }
@@ -1072,14 +1062,17 @@ fn stream_page_bands<R: Read, W: Write>(
     let bytes_to_copy =
         (cups_bytes_per_line - placement.src_skip).min(bw_bytes - placement.dst_offset);
 
+    // Bant tamponu (bandWidthInB x bandHeight bayt) bir kez ayrılır ve her
+    // bandın başında sıfırlanır: son bant eksik satırlı olabileceğinden
+    // sıfırlama zorunlu, ama sayfa başına onlarca kez yeniden tahsis etmek
+    // gereksiz.
+    let mut band_data = vec![0u8; bw_bytes * band_height];
+
     let mut current_line = 0;
 
     while current_line < total_lines {
         let lines_in_this_band = (total_lines - current_line).min(band_height);
-
-        // Band tamponu: bandWidthInB × bandHeight bayt, sıfır ile başlat
-        let band_size = bw_bytes * band_height;
-        let mut band_data = vec![0u8; band_size];
+        band_data.fill(0);
 
         for y in 0..lines_in_this_band {
             raster_reader.read_line(&mut line_buffer)?;
@@ -1184,6 +1177,78 @@ mod tests {
     use raster::CupsRasterVersion;
     use std::io::Cursor;
 
+    /// Argümansız (doğrudan boru hattı) çağrıyı temsil eder.
+    fn no_args() -> CupsFilterArgs {
+        CupsFilterArgs::default()
+    }
+
+    /// Projenin PPD dosyasını okur. Aşağıdaki testlerin bir bölümü, filtrenin
+    /// sabitlerini PPD'nin gerçek içeriğine bağlar: PPD'ye yeni bir seçenek
+    /// eklendiğinde sabitleri güncellemeyi unutmak testi kırar.
+    fn ppd_text() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ppd/samsung-ml2160.ppd"
+        ))
+        .expect("PPD okunamadı")
+    }
+
+    /// PPD'nin sunduğu `*Resolution` seçenekleri, (x_dpi, y_dpi) olarak.
+    /// `600dpi` gibi tek değerli adlar iki eksene de yazılır.
+    fn ppd_resolutions() -> Vec<(u32, u32)> {
+        let ppd = ppd_text();
+        let list: Vec<(u32, u32)> = ppd
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("*Resolution ")?;
+                let name = rest.split('/').next().unwrap_or("").trim_end_matches("dpi");
+                let parse = |v: &str| {
+                    v.parse::<u32>()
+                        .unwrap_or_else(|_| panic!("PPD çözünürlüğü ayrıştırılamadı: {}", line))
+                };
+                Some(match name.split_once('x') {
+                    Some((x, y)) => (parse(x), parse(y)),
+                    None => (parse(name), parse(name)),
+                })
+            })
+            .collect();
+        assert!(
+            list.len() >= 4,
+            "PPD'den çözünürlük okunamadı: {}",
+            list.len()
+        );
+        list
+    }
+
+    /// PPD'nin sunduğu `*PaperDimension` seçenekleri, (ad, genişlik_pt,
+    /// yükseklik_pt) olarak. Ondalık yazılmış ölçüler tavana yuvarlanır.
+    fn ppd_paper_dimensions() -> Vec<(String, u32, u32)> {
+        let ppd = ppd_text();
+        let list: Vec<(String, u32, u32)> = ppd
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("*PaperDimension ")?;
+                let (name, dims) = rest.split_once(':').expect("bozuk *PaperDimension satırı");
+                let name = name.split('/').next().unwrap().trim().to_string();
+                let mut it = dims.trim().trim_matches('"').split_whitespace();
+                let mut pt = || {
+                    it.next()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or_else(|| panic!("PPD kağıt boyutu ayrıştırılamadı: {}", line))
+                        .ceil() as u32
+                };
+                let (w, h) = (pt(), pt());
+                Some((name, w, h))
+            })
+            .collect();
+        assert!(
+            list.len() >= 10,
+            "PPD'den kağıt boyutu okunamadı: {}",
+            list.len()
+        );
+        list
+    }
+
     #[test]
     fn test_sanitize_copies_never_returns_zero() {
         assert_eq!(sanitize_copies(0), 1);
@@ -1255,7 +1320,7 @@ mod tests {
     #[test]
     fn test_validate_page_header_rejects_non_k_color_space() {
         let mut header = valid_header();
-        header.color_space = CupsColorSpace::Rgb;
+        header.color_space = CupsColorSpace(1); // RGB
         assert!(validate_page_header(&header).is_err());
     }
 
@@ -1299,17 +1364,6 @@ mod tests {
         stream.extend_from_slice(&buf);
         stream.extend_from_slice(&vec![0u8; pixel_bytes]);
         stream
-    }
-
-    fn no_args() -> CupsFilterArgs {
-        CupsFilterArgs {
-            job_id: None,
-            user: None,
-            title: None,
-            num_copies: None,
-            options: None,
-            filename: None,
-        }
     }
 
     /// İstenen geometri/duplex ile çok sayfalı, sıkıştırmasız (v3) bir CUPS
@@ -1631,102 +1685,53 @@ mod tests {
     /// reddedilmesine yol açardı. Bu test o bağı zorunlu kılar.
     #[test]
     fn test_limits_cover_every_ppd_option() {
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
-
-        let mut resolutions = 0;
-        let mut papers = 0;
-
-        for line in ppd.lines() {
-            // *Resolution 1200x600dpi/...  ya da  *Resolution 600dpi/...
-            if let Some(rest) = line.strip_prefix("*Resolution ") {
-                let name = rest.split('/').next().unwrap_or("");
-                let digits = name.trim_end_matches("dpi");
-                let (x_dpi, y_dpi) = match digits.split_once('x') {
-                    Some((x, y)) => (
-                        x.parse::<u32>().unwrap_or_else(|_| {
-                            panic!("PPD çözünürlüğü ayrıştırılamadı: {}", line)
-                        }),
-                        y.parse::<u32>().unwrap_or_else(|_| {
-                            panic!("PPD çözünürlüğü ayrıştırılamadı: {}", line)
-                        }),
-                    ),
-                    None => {
-                        let dpi = digits.parse::<u32>().unwrap_or_else(|_| {
-                            panic!("PPD çözünürlüğü ayrıştırılamadı: {}", line)
-                        });
-                        (dpi, dpi)
-                    }
-                };
+        for (x_dpi, y_dpi) in ppd_resolutions() {
+            assert!(
+                SplResolution::pair_is_supported(x_dpi, y_dpi),
+                "PPD {}x{} DPI sunuyor ama filtre bu çifti desteklemiyor",
+                x_dpi,
+                y_dpi
+            );
+            for dpi in [x_dpi, y_dpi] {
                 assert!(
-                    SplResolution::pair_is_supported(x_dpi, y_dpi),
-                    "PPD {}x{} DPI sunuyor ama filtre bu çifti desteklemiyor",
-                    x_dpi,
-                    y_dpi
+                    dpi <= MAX_DPI,
+                    "PPD {} DPI sunuyor ama MAX_DPI = {}; sabiti güncelleyin",
+                    dpi,
+                    MAX_DPI
                 );
-                for dpi in [x_dpi, y_dpi] {
-                    assert!(
-                        dpi <= MAX_DPI,
-                        "PPD {} DPI sunuyor ama MAX_DPI = {}; sabiti güncelleyin",
-                        dpi,
-                        MAX_DPI
-                    );
-                }
-                resolutions += 1;
-            }
-
-            // *PaperDimension A4/A4: "595 842"
-            if let Some(rest) = line.strip_prefix("*PaperDimension ") {
-                let dims = rest.split('"').nth(1).unwrap_or("");
-                let mut it = dims.split_whitespace();
-                let (w, h) = match (it.next(), it.next()) {
-                    (Some(w), Some(h)) => (w, h),
-                    _ => panic!("PPD kağıt boyutu ayrıştırılamadı: {}", line),
-                };
-                for value in [w, h] {
-                    // Bazı PPD'ler ondalık yazar; tavana yuvarla.
-                    let pt = value.parse::<f64>().expect("boyut sayı değil").ceil() as u32;
-                    assert!(
-                        pt <= MAX_POINTS,
-                        "PPD {} pt kağıt sunuyor ama MAX_POINTS = {}; sabiti güncelleyin",
-                        pt,
-                        MAX_POINTS
-                    );
-                    // En büyük kağıt en yüksek çözünürlükte satır/sütun
-                    // sınırlarına da sığmalı.
-                    let pixels = (pt as u64 * MAX_DPI as u64).div_ceil(72);
-                    assert!(
-                        pixels <= MAX_LINES as u64,
-                        "{} pt @ {} DPI = {} satır, MAX_LINES = {}",
-                        pt,
-                        MAX_DPI,
-                        pixels,
-                        MAX_LINES
-                    );
-                    assert!(
-                        pixels.div_ceil(8) <= MAX_BYTES_PER_LINE as u64,
-                        "{} pt @ {} DPI = {} bayt/satır, MAX_BYTES_PER_LINE = {}",
-                        pt,
-                        MAX_DPI,
-                        pixels.div_ceil(8),
-                        MAX_BYTES_PER_LINE
-                    );
-                }
-                papers += 1;
             }
         }
 
-        // PPD gerçekten ayrıştırıldı mı? (Dosya yeniden düzenlenirse sessizce
-        // hiçbir şey doğrulamayan bir test kalmasın.)
-        assert!(
-            resolutions >= 4,
-            "PPD'den çözünürlük okunamadı: {}",
-            resolutions
-        );
-        assert!(papers >= 10, "PPD'den kağıt boyutu okunamadı: {}", papers);
+        for (name, w, h) in ppd_paper_dimensions() {
+            for pt in [w, h] {
+                assert!(
+                    pt <= MAX_POINTS,
+                    "PPD '{}' {} pt kağıt sunuyor ama MAX_POINTS = {}; sabiti güncelleyin",
+                    name,
+                    pt,
+                    MAX_POINTS
+                );
+                // En büyük kağıt en yüksek çözünürlükte satır/sütun
+                // sınırlarına da sığmalı.
+                let pixels = (pt as u64 * MAX_DPI as u64).div_ceil(72);
+                assert!(
+                    pixels <= MAX_LINES as u64,
+                    "{} pt @ {} DPI = {} satır, MAX_LINES = {}",
+                    pt,
+                    MAX_DPI,
+                    pixels,
+                    MAX_LINES
+                );
+                assert!(
+                    pixels.div_ceil(8) <= MAX_BYTES_PER_LINE as u64,
+                    "{} pt @ {} DPI = {} bayt/satır, MAX_BYTES_PER_LINE = {}",
+                    pt,
+                    MAX_DPI,
+                    pixels.div_ceil(8),
+                    MAX_BYTES_PER_LINE
+                );
+            }
+        }
     }
 
     #[test]
@@ -2095,32 +2100,11 @@ mod tests {
     /// aksi hâlde kullanıcı sebebi belirsiz bir "filter failed" görür.
     #[test]
     fn test_filter_accepts_every_ppd_resolution() {
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
-
-        let mut checked = 0;
-        for line in ppd.lines() {
-            // *Resolution 1200x600dpi/...  ->  HWResolution[1200 600]
-            let Some(rest) = line.strip_prefix("*Resolution ") else {
-                continue;
-            };
-            let name = rest.split('/').next().unwrap_or("").trim_end_matches("dpi");
-            let (x, y) = match name.split_once('x') {
-                Some((a, b)) => (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap()),
-                None => {
-                    let v = name.parse::<u32>().unwrap();
-                    (v, v)
-                }
-            };
-
+        for (x, y) in ppd_resolutions() {
             // O çözünürlükte A4 için tutarlı bir başlık kur.
             let mut h = valid_header();
             h.hw_resolution = [x, y];
-            h.width = (595 * x).div_ceil(72);
-            h.bytes_per_line = h.width.div_ceil(8);
+            h.bytes_per_line = (595 * x).div_ceil(72).div_ceil(8);
             h.width = h.bytes_per_line * 8;
             h.height = (842 * y).div_ceil(72);
             assert!(
@@ -2130,9 +2114,7 @@ mod tests {
                 y,
                 validate_page_header(&h).err()
             );
-            checked += 1;
         }
-        assert!(checked >= 4, "PPD'den çözünürlük okunamadı: {}", checked);
     }
 
     /// D-04 regresyonu: `cupsColorOrder` artık denetleniyor.
@@ -2543,25 +2525,7 @@ mod tests {
     /// aynı olmalı. PPD'ye yeni bir çözünürlük eklenirse bu test onu kapsar.
     #[test]
     fn test_band_height_matches_splix_rule_for_every_ppd_resolution() {
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
-
-        let mut checked = 0;
-        for line in ppd.lines() {
-            let Some(rest) = line.strip_prefix("*Resolution ") else {
-                continue;
-            };
-            let name = rest.split('/').next().unwrap_or("").trim_end_matches("dpi");
-            let (x, y) = match name.split_once('x') {
-                Some((a, b)) => (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap()),
-                None => {
-                    let v = name.parse::<u32>().unwrap();
-                    (v, v)
-                }
-            };
+        for (x, y) in ppd_resolutions() {
             let expected = if x == 300 && y == 300 { 64 } else { 128 };
             let mut h = valid_header();
             h.hw_resolution = [x, y];
@@ -2573,9 +2537,7 @@ mod tests {
                 y,
                 expected
             );
-            checked += 1;
         }
-        assert!(checked >= 4, "PPD'den çözünürlük okunamadı: {}", checked);
     }
 
     // ======================================================================
@@ -2700,12 +2662,6 @@ mod tests {
     fn test_every_ppd_paper_size_maps_to_its_qpdl_code() {
         use spl::SplPaperSize;
 
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
-
         let expected = |name: &str| -> SplPaperSize {
             match name {
                 "A4" => SplPaperSize::A4,
@@ -2723,32 +2679,22 @@ mod tests {
             }
         };
 
-        let mut checked = 0;
-        for line in ppd.lines() {
-            let Some(rest) = line.strip_prefix("*PaperDimension ") else {
-                continue;
-            };
-            let (name, dims) = rest.split_once(':').expect("bozuk *PaperDimension satırı");
-            let name = name.split('/').next().unwrap().trim();
-            let dims = dims.trim().trim_matches('"');
-            let mut it = dims.split_whitespace();
-            let w: u32 = it.next().unwrap().parse().unwrap();
-            let h: u32 = it.next().unwrap().parse().unwrap();
-
+        let papers = ppd_paper_dimensions();
+        assert_eq!(
+            papers.len(),
+            11,
+            "PPD'den beklenen sayıda kağıt boyutu okunamadı"
+        );
+        for (name, w, h) in papers {
             assert_eq!(
                 SplPaperSize::from_dimensions_pt_exact(w, h),
-                Some(expected(name)),
+                Some(expected(&name)),
                 "PPD '{}' = {}x{} pt, ama kesin eşleme başka bir kod veriyor",
                 name,
                 w,
                 h
             );
-            checked += 1;
         }
-        assert_eq!(
-            checked, 11,
-            "PPD'den beklenen sayıda kağıt boyutu okunamadı"
-        );
     }
 
     /// Folio 210x330 mm'dir (595x935 pt). 612x936 pt olan 8.5x13 inç ölçüsü
@@ -2784,11 +2730,7 @@ mod tests {
     fn test_every_ppd_input_slot_maps_to_its_qpdl_code() {
         use spl::SplPaperSource;
 
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
+        let ppd = ppd_text();
 
         let expected = |name: &str| -> SplPaperSource {
             match name {
@@ -2874,11 +2816,7 @@ mod tests {
     /// zarf/etiket düz kağıt füzer ayarlarıyla basılır.
     #[test]
     fn test_every_ppd_media_type_is_accepted_by_the_filter() {
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
+        let ppd = ppd_text();
 
         let mut checked = 0;
         for line in ppd.lines() {
@@ -2959,11 +2897,7 @@ mod tests {
     /// seçim yapılmamış bir iş de aynı sonucu üretmeli.
     #[test]
     fn test_ppd_defaults_match_filter_defaults() {
-        let ppd = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ppd/samsung-ml2160.ppd"
-        ))
-        .expect("PPD okunamadı");
+        let ppd = ppd_text();
 
         let default_of = |key: &str| -> String {
             ppd.lines()

@@ -76,109 +76,49 @@ impl CupsRasterVersion {
     }
 }
 
-/// CUPS Renk Uzayları (`cups_cspace_e`)
+/// CUPS Renk Uzayı (`cups_cspace_e`) — ham sayısal kod.
+///
+/// Spesifikasyon 40'tan fazla renk uzayı tanımlar, ama bu sürücü yalnızca
+/// `K` ile çalışır: diğer her değer `validate_page_header` tarafından
+/// reddedilir. Bu yüzden uzayların tamamını ayrı ayrı modellemek yerine ham
+/// kod saklanıyor. Karar veren iki nokta da (K kontrolü ve v2 çözücüsünün
+/// boş renk dolgusu) zaten sayısal kodla çalışır; adlar yalnızca hata
+/// mesajlarında görünür.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CupsColorSpace {
-    W,        // 0: Luminance / Gri tonlama (0 = Beyaz)
-    Rgb,      // 1: Standart RGB
-    Rgba,     // 2: RGB + Alpha
-    K,        // 3: Siyah-Beyaz / Siyah-Tonlama (0 = Siyah, Samsung lazer için ideal)
-    Cmy,      // 4: Cyan, Magenta, Yellow
-    Cmyk,     // 5: Cyan, Magenta, Yellow, Black
-    Ymc,      // 6
-    Ymck,     // 7
-    Kcmy,     // 8
-    Kcmycm,   // 9
-    Gmck,     // 10
-    Gmcs,     // 11
-    White,    // 12
-    Gold,     // 13
-    Silver,   // 14
-    CieXyz,   // 15
-    CieLab,   // 16
-    Rgbw,     // 17
-    Sw,       // 18: sRGB Tabanlı Gri tonlama (DeviceGray)
-    Srgb,     // 19: sRGB Renkli
-    AdobeRgb, // 20: Adobe RGB
-    Device1,  // 32..47: Cihaza özel renk kanalları
-    Device2,
-    Device3,
-    Device4,
-    Device5,
-    Device6,
-    Device7,
-    Device8,
-    Device9,
-    Device10,
-    Device11,
-    Device12,
-    Device13,
-    Device14,
-    Device15,
-    Device16,
-    Unknown(u32),
-}
+pub struct CupsColorSpace(pub u32);
 
-impl From<u32> for CupsColorSpace {
-    fn from(val: u32) -> Self {
-        match val {
-            0 => CupsColorSpace::W,
-            1 => CupsColorSpace::Rgb,
-            2 => CupsColorSpace::Rgba,
-            3 => CupsColorSpace::K,
-            4 => CupsColorSpace::Cmy,
-            5 => CupsColorSpace::Cmyk,
-            6 => CupsColorSpace::Ymc,
-            7 => CupsColorSpace::Ymck,
-            8 => CupsColorSpace::Kcmy,
-            9 => CupsColorSpace::Kcmycm,
-            10 => CupsColorSpace::Gmck,
-            11 => CupsColorSpace::Gmcs,
-            12 => CupsColorSpace::White,
-            13 => CupsColorSpace::Gold,
-            14 => CupsColorSpace::Silver,
-            15 => CupsColorSpace::CieXyz,
-            16 => CupsColorSpace::CieLab,
-            17 => CupsColorSpace::Rgbw,
-            18 => CupsColorSpace::Sw,
-            19 => CupsColorSpace::Srgb,
-            20 => CupsColorSpace::AdobeRgb,
-            32 => CupsColorSpace::Device1,
-            33 => CupsColorSpace::Device2,
-            34 => CupsColorSpace::Device3,
-            35 => CupsColorSpace::Device4,
-            36 => CupsColorSpace::Device5,
-            37 => CupsColorSpace::Device6,
-            38 => CupsColorSpace::Device7,
-            39 => CupsColorSpace::Device8,
-            40 => CupsColorSpace::Device9,
-            41 => CupsColorSpace::Device10,
-            42 => CupsColorSpace::Device11,
-            43 => CupsColorSpace::Device12,
-            44 => CupsColorSpace::Device13,
-            45 => CupsColorSpace::Device14,
-            46 => CupsColorSpace::Device15,
-            47 => CupsColorSpace::Device16,
-            other => CupsColorSpace::Unknown(other),
+impl CupsColorSpace {
+    /// Siyah-tonlama (0 = siyah). Samsung lazer motorunun beklediği tek uzay.
+    pub const K: CupsColorSpace = CupsColorSpace(3);
+
+    /// `n == 128` (satır sonuna kadar boşalt) kaydında kullanılacak dolgu.
+    ///
+    /// libcups, toner/mürekkep EKLEYEN uzaylarda — K (3), CMY (4), CMYK (5),
+    /// White (12), Gold (13), Silver (14) — boşluğu `0x00`, diğerlerinde
+    /// `0xFF` ile doldurur.
+    fn blank_fill(self) -> u8 {
+        match self.0 {
+            3 | 4 | 5 | 12 | 13 | 14 => 0x00,
+            _ => 0xFF,
         }
     }
 }
 
 impl fmt::Display for CupsColorSpace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CupsColorSpace::W => write!(f, "W (White=0 Grayscale)"),
-            CupsColorSpace::Rgb => write!(f, "RGB"),
-            CupsColorSpace::Rgba => write!(f, "RGBA"),
-            CupsColorSpace::K => write!(f, "K (Black=0 Grayscale)"),
-            CupsColorSpace::Cmy => write!(f, "CMY"),
-            CupsColorSpace::Cmyk => write!(f, "CMYK"),
-            CupsColorSpace::Sw => write!(f, "sGray (sRGB Grayscale)"),
-            CupsColorSpace::Srgb => write!(f, "sRGB"),
-            CupsColorSpace::AdobeRgb => write!(f, "AdobeRGB"),
-            CupsColorSpace::Unknown(id) => write!(f, "Unknown({})", id),
-            other => write!(f, "{:?}", other),
-        }
+        let name = match self.0 {
+            0 => "W (White=0 Grayscale)",
+            1 => "RGB",
+            2 => "RGBA",
+            3 => "K (Black=0 Grayscale)",
+            4 => "CMY",
+            5 => "CMYK",
+            18 => "sGray (sRGB Grayscale)",
+            19 => "sRGB",
+            20 => "AdobeRGB",
+            other => return write!(f, "Bilinmeyen({})", other),
+        };
+        write!(f, "{}", name)
     }
 }
 
@@ -436,7 +376,7 @@ impl PageHeader {
             bits_per_pixel,
             bytes_per_line,
             color_order: CupsColorOrder::from(color_order_val),
-            color_space: CupsColorSpace::from(color_space_val),
+            color_space: CupsColorSpace(color_space_val),
             compression,
             row_count,
             row_feed,
@@ -625,19 +565,9 @@ impl CupsLineDecoder {
             1
         };
 
-        let blank_fill = match header.color_space {
-            CupsColorSpace::K
-            | CupsColorSpace::Cmy
-            | CupsColorSpace::Cmyk
-            | CupsColorSpace::White
-            | CupsColorSpace::Gold
-            | CupsColorSpace::Silver => 0x00,
-            _ => 0xFF,
-        };
-
         Self {
             bpp: bpp.max(1),
-            blank_fill,
+            blank_fill: header.color_space.blank_fill(),
             repeat_remaining: 0,
             last_line: Vec::new(),
         }

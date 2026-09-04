@@ -392,44 +392,36 @@ impl Algo0x11 {
         let mut occurrences: Vec<(u32, usize)> =
             (0..COMPRESS_SAMPLE_RATE).map(|i| (0u32, i)).collect();
 
-        if data.len() >= COMPRESS_SAMPLE_RATE {
-            let mut i = COMPRESS_SAMPLE_RATE;
-            while i < data.len() {
-                let b = data[i];
-                let max_j = COMPRESS_SAMPLE_RATE.min(i);
-                for j in 1..max_j {
-                    if data[i - j] == b {
-                        occurrences[j - 1].0 += 1;
-                    }
-                }
-                i += COMPRESS_SAMPLE_RATE;
-            }
+        // Veri örnekleme aralığından uzunsa her 2048 baytta bir örnek alınır;
+        // kısaysa aralık hiç dolmayacağı için her bayt taranır. İki durumun
+        // tek farkı tarama başlangıcı ve adımıdır.
+        let (start, step) = if data.len() >= COMPRESS_SAMPLE_RATE {
+            (COMPRESS_SAMPLE_RATE, COMPRESS_SAMPLE_RATE)
         } else {
-            for i in 1..data.len() {
-                let b = data[i];
-                let max_j = COMPRESS_SAMPLE_RATE.min(i);
-                for j in 1..max_j {
-                    if data[i - j] == b {
-                        occurrences[j - 1].0 += 1;
-                    }
+            (1, 1)
+        };
+
+        let mut i = start;
+        while i < data.len() {
+            let b = data[i];
+            let max_j = COMPRESS_SAMPLE_RATE.min(i);
+            for j in 1..max_j {
+                if data[i - j] == b {
+                    occurrences[j - 1].0 += 1;
                 }
             }
+            i += step;
         }
 
         occurrences.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
+        // En sık rastlanan 64 ofset. Tabloda 1 (bir önceki bayt) mutlaka
+        // bulunmalı; yoksa son sıra ona ayrılır.
         let mut table = [1u16; TABLE_PTR_SIZE];
-        let mut one_present = false;
-
-        for i in 0..TABLE_PTR_SIZE {
-            let offset = (occurrences[i].1 + 1) as u16;
-            table[i] = offset;
-            if offset == 1 {
-                one_present = true;
-            }
+        for (slot, &(_, offset)) in table.iter_mut().zip(occurrences.iter()) {
+            *slot = (offset + 1) as u16;
         }
-
-        if !one_present {
+        if !table.contains(&1) {
             table[TABLE_PTR_SIZE - 1] = 1;
         }
 
