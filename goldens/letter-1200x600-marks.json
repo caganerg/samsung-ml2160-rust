@@ -1,0 +1,45 @@
+{
+  "case": "letter-1200x600-marks",
+  "note": "Klasik CUPS sayfa başlığı ve filtrenin ondan türettiği QPDL yerleşimi. PAPPL tarafındaki seçenek eşlemesi buna karşı doğrulanacak.",
+  "input": {
+    "encoding": "RaS3",
+    "pages": 1,
+    "content": "registration-marks"
+  },
+  "cups_page_header": {
+    "MediaType": "",
+    "cupsPageSizeName": "Letter",
+    "HWResolution": [1200, 600],
+    "PageSize": [612, 792],
+    "ImagingBoundingBox": [12, 12, 600, 780],
+    "Margins": [12, 12],
+    "MediaPosition": 0,
+    "NumCopies": 1,
+    "Duplex": false,
+    "Tumble": false,
+    "cupsWidth": 9800,
+    "cupsHeight": 6400,
+    "cupsBytesPerLine": 1225,
+    "cupsBitsPerColor": 1,
+    "cupsBitsPerPixel": 1,
+    "cupsColorOrder": 0,
+    "cupsColorSpace": 3,
+    "cupsCompression": 0
+  },
+  "derived_qpdl": {
+    "page_width_pixels": 10200,
+    "band_width_bytes": 1275,
+    "band_height_lines": 128,
+    "hard_margin_bytes": 25,
+    "dst_offset_bytes": 0,
+    "src_skip_bytes": 0,
+    "paper_size_code": 0,
+    "paper_source_code": 1,
+    "copies_sent": 1
+  },
+  "ppd_source": {
+    "PageSize": "Letter",
+    "PaperDimension": "612 792",
+    "ImageableArea": "12 12 600 780"
+  }
+}

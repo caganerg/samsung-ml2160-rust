@@ -1,0 +1,45 @@
+{
+  "case": "a4-1200x600-marks",
+  "note": "Klasik CUPS sayfa başlığı ve filtrenin ondan türettiği QPDL yerleşimi. PAPPL tarafındaki seçenek eşlemesi buna karşı doğrulanacak.",
+  "input": {
+    "encoding": "RaS3",
+    "pages": 1,
+    "content": "registration-marks"
+  },
+  "cups_page_header": {
+    "MediaType": "",
+    "cupsPageSizeName": "A4",
+    "HWResolution": [1200, 600],
+    "PageSize": [595, 842],
+    "ImagingBoundingBox": [12, 12, 583, 830],
+    "Margins": [12, 12],
+    "MediaPosition": 0,
+    "NumCopies": 1,
+    "Duplex": false,
+    "Tumble": false,
+    "cupsWidth": 9517,
+    "cupsHeight": 6817,
+    "cupsBytesPerLine": 1190,
+    "cupsBitsPerColor": 1,
+    "cupsBitsPerPixel": 1,
+    "cupsColorOrder": 0,
+    "cupsColorSpace": 3,
+    "cupsCompression": 0
+  },
+  "derived_qpdl": {
+    "page_width_pixels": 9920,
+    "band_width_bytes": 1240,
+    "band_height_lines": 128,
+    "hard_margin_bytes": 25,
+    "dst_offset_bytes": 0,
+    "src_skip_bytes": 0,
+    "paper_size_code": 2,
+    "paper_source_code": 1,
+    "copies_sent": 1
+  },
+  "ppd_source": {
+    "PageSize": "A4",
+    "PaperDimension": "595 842",
+    "ImageableArea": "12 12 583 830"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "case": "a5-600-marks",
+  "note": "Klasik CUPS sayfa başlığı ve filtrenin ondan türettiği QPDL yerleşimi. PAPPL tarafındaki seçenek eşlemesi buna karşı doğrulanacak.",
+  "input": {
+    "encoding": "RaS3",
+    "pages": 1,
+    "content": "registration-marks"
+  },
+  "cups_page_header": {
+    "MediaType": "",
+    "cupsPageSizeName": "A5",
+    "HWResolution": [600, 600],
+    "PageSize": [420, 595],
+    "ImagingBoundingBox": [12, 12, 408, 583],
+    "Margins": [12, 12],
+    "MediaPosition": 0,
+    "NumCopies": 1,
+    "Duplex": false,
+    "Tumble": false,
+    "cupsWidth": 3300,
+    "cupsHeight": 4758,
+    "cupsBytesPerLine": 413,
+    "cupsBitsPerColor": 1,
+    "cupsBitsPerPixel": 1,
+    "cupsColorOrder": 0,
+    "cupsColorSpace": 3,
+    "cupsCompression": 0
+  },
+  "derived_qpdl": {
+    "page_width_pixels": 3504,
+    "band_width_bytes": 438,
+    "band_height_lines": 128,
+    "hard_margin_bytes": 13,
+    "dst_offset_bytes": 0,
+    "src_skip_bytes": 1,
+    "paper_size_code": 16,
+    "paper_source_code": 1,
+    "copies_sent": 1
+  },
+  "ppd_source": {
+    "PageSize": "A5",
+    "PaperDimension": "420 595",
+    "ImageableArea": "12 12 408 583"
+  }
+}
