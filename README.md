@@ -1,6 +1,6 @@
 # samsung-ml2160-rust
-> ### 🚀 Project Status: Stable & Complete (`v1.0.2`)
-> This driver is **production-ready**, feature-complete, and actively verified on Debian Linux. No further major development is planned as the core SPL rasterization and PJL command stack are fully functional and stable.
+> ### 🚀 Project Status: 1.x complete (`v1.0.2`) · 2.0 in development
+> The CUPS raster filter is **production-ready**, feature-complete, and actively verified on Debian Linux: the core SPL rasterization and PJL command stack are fully functional and stable. It is frozen at `v1.0.2` on the `legacy/cups-filter-1.x` branch, which is where fixes to the filter belong. `main` now carries `2.0.0-alpha`, where the driver becomes a standalone Printer Application.
 >
 > 🧪 **Community Testing & Feedback Wanted:**
 > While primarily verified on the **Samsung ML-2160** series, this driver should theoretically support other SPL-based Samsung / SPL-compatible monochrome laser printers. 
@@ -121,7 +121,7 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 
 REPO=$PWD
-VERSION=1.0.2-1
+VERSION=2.0.0~alpha-1
 DOC=usr/share/doc/samsung-ml2160-rust
 BUILD=$(mktemp -d)
 mkdir -p "$BUILD"/root/usr/lib/cups/filter \
@@ -160,7 +160,7 @@ what makes the installed filter root-owned regardless of who built the package.
 ### Install it and register the queue
 
 ```sh
-sudo apt install ./dist/samsung-ml2160-rust_1.0.2-1_amd64.deb
+sudo apt install ./dist/samsung-ml2160-rust_2.0.0~alpha-1_amd64.deb
 sudo lpadmin -p ML2160_Rust -E -v "$DEVICE_URI" \
     -P /usr/share/ppd/samsung-ml2160-rust/samsung-ml2160.ppd
 ```

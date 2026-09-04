@@ -2,7 +2,7 @@
 *%%%% PPD file for Samsung ML-2160 Series with rastertospl-rust
 *%%%% Generated for Linux CUPS Printing Architecture
 *FormatVersion: "4.3"
-*FileVersion: "1.0.2"
+*FileVersion: "2.0.0"
 *LanguageVersion: English
 *LanguageEncoding: ISOLatin1
 *PCFileName: "ML2160.PPD"
