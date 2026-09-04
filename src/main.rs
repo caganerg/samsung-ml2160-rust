@@ -373,6 +373,84 @@ fn compute_page_height_lines(page_size_pt: u32, y_dpi: u32) -> u32 {
     (page_size_pt as f64 * y_dpi as f64 / 72.0).ceil() as u32
 }
 
+/// Yazıcının SERT KENAR BOŞLUĞUNU (hard margin) bant tamponu baytına çevirir.
+///
+/// SpliX compress.cpp `_compressBandedPage`:
+///
+/// ```c
+/// hardMarginX = ((unsigned long)ceil(page->convertToXResolution(
+///     request.printer()->hardMarginX())) + 7) & ~7;
+/// hardMarginXInB = hardMarginX / 8;
+/// ```
+///
+/// SpliX bu değeri PPD'nin `*ImageableArea` sol kenar boşluğundan alır
+/// (`printer.cpp`: `_hardMarginX = value.marginX()`). Bu filtre PPD'yi
+/// okumadığı için aynı sayıyı CUPS Raster başlığının `Margins[0]` alanından
+/// alıyor: cups-filters oraya tam olarak seçilen `*ImageableArea`nın sol
+/// kenar boşluğunu (bu projenin PPD'sinde 12 pt) yazar.
+///
+/// 8'e yukarı hizalama SpliX'ten birebir alındı ve önemlidir: 12 pt @600 DPI
+/// = 100 piksel, hizalandığında 104 piksel = 13 bayt olur. 12,5'e yuvarlanmış
+/// bir değer bantı yarım bayt kaydırırdı ki bant tamponu bayt adreslidir.
+fn hard_margin_bytes(margin_pt: u32, x_dpi: u32) -> usize {
+    let px = (margin_pt as f64 * x_dpi as f64 / 72.0).ceil() as u32;
+    (((px + 7) & !7u32) / 8) as usize
+}
+
+/// CUPS satırının bant tamponundaki yatay yerleşimi.
+///
+/// İki alan birlikte tek bir işaretli ofseti temsil eder: `dst_offset`
+/// pozitif kaydırma, `src_skip` ise negatif kaydırmadır (satırın solundan
+/// atılan baytlar). İkisi aynı anda sıfırdan büyük olamaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BandPlacement {
+    /// İçeriğin bant tamponunda başladığı sütun (bayt).
+    dst_offset: usize,
+    /// CUPS satırının başından atlanacak bayt sayısı.
+    src_skip: usize,
+}
+
+/// CUPS satırının bant tamponundaki yatay konumunu SpliX ile aynı şekilde
+/// hesaplar.
+///
+/// D-06 regresyonu. Burada eskiden yalnızca ORTALAMA vardı
+/// (`(bandWidthInB - lineSize) / 2`) ve sert kenar boşluğu hiç düşülmüyordu;
+/// oysa SpliX iki adımı da uygular:
+///
+/// ```c
+/// // document.cpp:120 — satırı sayfa genişliğinde ortala
+/// marginWidthInB = (pageWidthInB - lineSize) / 2;
+/// // compress.cpp:227 — bandı doldururken sert kenar boşluğunu ATLA
+/// band[x * bandHeight + y] = planes[i][index + x + hardMarginXInB + ...];
+/// ```
+///
+/// Net ofset `ortalama - hardMarginXInB`'dir. A4 @600 DPI'da ortalama
+/// `(620 - 595) / 2 = 12` bayt, sert kenar boşluğu 13 bayttır; yani içerik
+/// bandın 0. sütunundan başlar. Yalnızca ortalama uygulandığında içerik 12
+/// bayt (96 piksel ≈ 11,5 pt ≈ 4 mm) sağa kayıyordu ve sağ kenarı basılabilir
+/// alanın dışına taşıyordu.
+///
+/// Bu, dikey eksenle de tutarlılık sağlar: dikeyde hiçbir zaman kaydırma
+/// yapılmadı (sayfa döngüsü ilk satırı bandın 0. satırına yazar) ve SpliX'in
+/// dikey neti de sıfırdır — ortalama `(7017 - 6817) / 2 = 100` satır, sert
+/// kenar boşluğu `hardMarginY = 100` satır. İki eksenin farklı origin
+/// varsayması hatanın kendisiydi.
+fn band_placement(
+    band_width_bytes: usize,
+    cups_line_bytes: usize,
+    hard_margin_bytes: usize,
+) -> BandPlacement {
+    let centered = band_width_bytes.saturating_sub(cups_line_bytes) / 2;
+    BandPlacement {
+        dst_offset: centered.saturating_sub(hard_margin_bytes),
+        // Satırın tamamı atlanamaz: kopyalanacak en az bir bayt kalmalı,
+        // aksi hâlde tamamen boş bir sayfa üretilirdi.
+        src_skip: hard_margin_bytes
+            .saturating_sub(centered)
+            .min(cups_line_bytes.saturating_sub(1)),
+    }
+}
+
 /// CUPS Raster sayfa başlığındaki duplex bilgisini QPDL duplex moduna çevirir.
 ///
 /// SpliX `request.cpp` bu kararı PPD üzerinden verir:
@@ -768,24 +846,29 @@ fn process_cups_raster_to_spl<W: Write>(
         let band_width_u16 = to_u16(band_width_pixels, "Bant genişliği")?;
         let page_height_u16 = to_u16(header.height, "Sayfa yüksekliği")?;
 
-        // CUPS raster verisi (596B) ile bant genişliği (620B) farkı = margin
+        // CUPS raster verisi (595B) bant genişliğinde (620B) ortalanır, sonra
+        // yazıcının sert kenar boşluğu düşülür; bkz. `band_placement`.
         let cups_line_bytes = header.bytes_per_line as usize;
-        let margin_bytes = if (band_width_bytes as usize) > cups_line_bytes {
-            ((band_width_bytes as usize) - cups_line_bytes) / 2
-        } else {
-            if (band_width_bytes as usize) < cups_line_bytes {
-                eprintln!(
-                    "WARNING: Hesaplanan bant genişliği ({} B) CUPS satır genişliğinden ({} B) dar; \
-                     satırların sağ kenarı kırpılacak.",
-                    band_width_bytes, cups_line_bytes
-                );
-            }
-            0
-        };
+        if (band_width_bytes as usize) < cups_line_bytes {
+            eprintln!(
+                "WARNING: Hesaplanan bant genişliği ({} B) CUPS satır genişliğinden ({} B) dar; \
+                 satırların sağ kenarı kırpılacak.",
+                band_width_bytes, cups_line_bytes
+            );
+        }
+        let hard_margin = hard_margin_bytes(header.margins[0], header.hw_resolution[0]);
+        let placement = band_placement(band_width_bytes as usize, cups_line_bytes, hard_margin);
 
         eprintln!(
-            "DEBUG: QPDL Genişlik: cupsWidth={}, pageWidthPx={}, bandWidthPx={}, bandWidthB={}, marginB={}",
-            header.width, page_width_pixels, band_width_pixels, band_width_bytes, margin_bytes
+            "DEBUG: QPDL Genişlik: cupsWidth={}, pageWidthPx={}, bandWidthPx={}, bandWidthB={}, \
+             hardMarginB={}, dstOffsetB={}, srcSkipB={}",
+            header.width,
+            page_width_pixels,
+            band_width_pixels,
+            band_width_bytes,
+            hard_margin,
+            placement.dst_offset,
+            placement.src_skip
         );
 
         // `validate_page_header` bilinmeyen ölçüleri reddeder. Buradaki ikinci
@@ -882,7 +965,7 @@ fn process_cups_raster_to_spl<W: Write>(
             &header,
             band_width_u16,
             band_width_bytes,
-            margin_bytes,
+            placement,
         )?;
 
         // 3-Baytlık QPDL Sayfa Sonu
@@ -913,7 +996,7 @@ fn process_cups_raster_to_spl<W: Write>(
 ///
 /// SpliX document.cpp + compress.cpp akışını takip eder:
 /// 1. CUPS raster satırını okur (cupsBytesPerLine bayt)
-/// 2. bandWidthInB genişliğinde bir şerit tampona, margin ile ortalayarak kopyalar
+/// 2. bandWidthInB genişliğinde bir şerit tampona, `BandPlacement`e göre kopyalar
 /// 3. Şeridi Algo 0x11 RLE ile sıkıştırır
 /// 4. QPDL Record 0x0C + Subheader 0x09ABCDEF + Payload + Checksum olarak yazar
 fn stream_page_bands<R: Read, W: Write>(
@@ -922,7 +1005,7 @@ fn stream_page_bands<R: Read, W: Write>(
     header: &PageHeader,
     band_width_pixels: u16,
     band_width_bytes: u32,
-    margin_bytes: usize,
+    placement: BandPlacement,
 ) -> io::Result<()> {
     let cups_bytes_per_line = header.bytes_per_line as usize;
     let total_lines = header.height as usize;
@@ -933,8 +1016,10 @@ fn stream_page_bands<R: Read, W: Write>(
     // CUPS raster satır okuma tamponu
     let mut line_buffer = vec![0u8; cups_bytes_per_line];
 
-    // Kopyalanacak bayt sayısı: CUPS satırı bant genişliğine sığmalı
-    let bytes_to_copy = cups_bytes_per_line.min(bw_bytes - margin_bytes);
+    // Kopyalanacak bayt sayısı: satırın atlanan solundan sonra kalan kısmı,
+    // bant tamponunda içeriğe ayrılan yere sığmalı.
+    let bytes_to_copy =
+        (cups_bytes_per_line - placement.src_skip).min(bw_bytes - placement.dst_offset);
 
     let mut current_line = 0;
 
@@ -950,12 +1035,17 @@ fn stream_page_bands<R: Read, W: Write>(
 
             // SpliX algo0x11.h: Algo0x11::reverseLineColumn() == true, yani
             // compress.cpp'deki _compressBandedPage bant tamponunu SÜTUN-ÖNCELİKLİ
-            // (transpoze) doldurur: band[x * bandHeight + y] = kaynak[x + margin].
+            // (transpoze) doldurur:
+            //   band[x * bandHeight + y] = planes[i][x + hardMarginXInB + ...]
             // Satır-öncelikli (row-major) doldurma, sıkıştırma kendisi doğru
             // çalışsa bile yazıcının transpoze edilmiş/gürültülü bir görüntü
             // çözmesine yol açar.
-            for (c, &byte) in line_buffer.iter().take(bytes_to_copy).enumerate() {
-                let col = margin_bytes + c;
+            for (c, &byte) in line_buffer[placement.src_skip..]
+                .iter()
+                .take(bytes_to_copy)
+                .enumerate()
+            {
+                let col = placement.dst_offset + c;
                 band_data[col * band_height + y] = byte;
             }
         }
@@ -1187,6 +1277,11 @@ mod tests {
         media_position: u32,
         /// CUPS `MediaType` (PPD `*MediaType`); boş = seçilmemiş.
         media_type: &'static str,
+        /// CUPS `Margins[0]` (PPD `*ImageableArea`nın sol kenar boşluğu, pt).
+        margin_left_pt: u32,
+        /// Her raster satırı için kullanılacak desen; `None` = tamamen boş
+        /// satır. Uzunluğu `bytes_per_line()` olmalıdır.
+        line_pattern: Option<Vec<u8>>,
     }
 
     impl RasterSpec {
@@ -1204,6 +1299,8 @@ mod tests {
                 pages: 1,
                 media_position: 0,
                 media_type: "",
+                margin_left_pt: 0,
+                line_pattern: None,
             }
         }
 
@@ -1219,6 +1316,7 @@ mod tests {
                     buf[off..off + 4].copy_from_slice(&val.to_be_bytes());
                 };
                 put(272, self.duplex as u32);
+                put(312, self.margin_left_pt); // Margins[0] (sol, pt)
                 put(324, self.media_position);
                 put(276, self.res_x);
                 put(280, self.res_y);
@@ -1234,11 +1332,62 @@ mod tests {
                 let media_type = self.media_type.as_bytes();
                 buf[128..128 + media_type.len()].copy_from_slice(media_type);
                 stream.extend_from_slice(&buf);
-                stream
-                    .extend_from_slice(&vec![0u8; (self.bytes_per_line() * self.height) as usize]);
+                let line = match &self.line_pattern {
+                    Some(pattern) => {
+                        assert_eq!(
+                            pattern.len(),
+                            self.bytes_per_line() as usize,
+                            "desen satır uzunluğuyla uyuşmuyor"
+                        );
+                        pattern.clone()
+                    }
+                    None => vec![0u8; self.bytes_per_line() as usize],
+                };
+                for _ in 0..self.height {
+                    stream.extend_from_slice(&line);
+                }
             }
             stream
         }
+    }
+
+    /// Üretilen SPL akışındaki İLK şerit kaydının payload'ını çözüp,
+    /// `stream_page_bands`'in yazdığı bant tamponunu (terslemeden ÖNCEKİ
+    /// hâliyle) geri verir.
+    ///
+    /// Tampon transpozedir: `band[col * band_height + y]`.
+    fn first_band_buffer(out: &[u8]) -> Vec<u8> {
+        // Kayıt konumu deterministik olarak bulunur: 0x0C baytını aramak
+        // güvenli değil, çünkü sayfa başlığının 0x4 baytı da (EnvIsoB5 kağıt
+        // kodu) 0x0C olabilir.
+        const QPDL_MARK: &[u8] = b"ENTER LANGUAGE = QPDL\n";
+        let pos = out
+            .windows(QPDL_MARK.len())
+            .position(|w| w == QPDL_MARK)
+            .expect("QPDL diline geçiş satırı yok")
+            + QPDL_MARK.len()
+            + 17; // 17 baytlık sayfa başlığından sonrası
+        assert_eq!(out[pos], 0x0C, "şerit kaydı imzası beklendi");
+        assert_eq!(out[pos + 6], 0x11, "Algo 0x11 bekleniyordu");
+        let total = u32::from_be_bytes(out[pos + 7..pos + 11].try_into().unwrap()) as usize;
+        // 11 bayt kayıt başlığı + 4 bayt alt başlık; sondaki 4 bayt checksum.
+        let payload = &out[pos + 15..pos + 11 + total - 4];
+        let mut band = spl::Algo0x11::decompress(payload);
+        // `stream_page_bands` yazmadan hemen önce tersliyor; geri al.
+        for b in &mut band {
+            *b = !*b;
+        }
+        band
+    }
+
+    /// Transpoze bant tamponunda, ilk satırdaki (`y == 0`) sıfır olmayan
+    /// baytların sütun indislerini döner.
+    fn nonzero_columns_in_first_line(band: &[u8], band_height: usize) -> Vec<usize> {
+        band.chunks(band_height)
+            .enumerate()
+            .filter(|(_, col)| col[0] != 0)
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     /// Üretilen SPL akışındaki tek bir şerit kaydının başlık alanları.
@@ -1652,6 +1801,156 @@ mod tests {
         assert!(
             validate_page_header(&too_tall).is_err(),
             "9 satır aşım reddedilmeli"
+        );
+    }
+
+    /// D-06: sert kenar boşluğu SpliX ile birebir aynı hesaplanmalı.
+    ///
+    /// SpliX compress.cpp: `((ceil(marginPt * dpi / 72) + 7) & ~7) / 8`.
+    /// 8'e YUKARI hizalama önemli: 12 pt @600 DPI = 100 piksel, hizalanınca
+    /// 104 piksel = 13 bayt olur; hizalamasız 12,5 bayt (kırpılınca 12) çıkar
+    /// ve bant bir bayt kayar.
+    #[test]
+    fn test_hard_margin_matches_splix_alignment() {
+        // Bu projenin PPD'sindeki *ImageableArea sol kenar boşluğu: 12 pt.
+        assert_eq!(hard_margin_bytes(12, 600), 13);
+        assert_eq!(hard_margin_bytes(12, 300), 7);
+        assert_eq!(hard_margin_bytes(12, 1200), 25);
+        // Kenar boşluğu bildirilmemişse kaydırma da yok.
+        assert_eq!(hard_margin_bytes(0, 600), 0);
+    }
+
+    /// D-06 regresyonu: yatay yerleşim ORTALAMA EKSİ SERT KENAR BOŞLUĞU
+    /// olmalıdır, yalnızca ortalama değil.
+    ///
+    /// Eskiden yalnızca `(bandWidthInB - lineSize) / 2` uygulanıyordu; A4 @600
+    /// DPI'da bu 12 baytlık (96 piksel ≈ 4 mm) bir sağa kayma demekti, çünkü
+    /// SpliX bandı doldururken `hardMarginXInB` (13 bayt) kadar ATLAR
+    /// (compress.cpp:227). Net ofset sıfırdır.
+    #[test]
+    fn test_band_placement_subtracts_hard_margin() {
+        // A4 @600 DPI, bu projenin PPD'sindeki gerçek sayılar:
+        // bant 620 B, CUPS satırı 595 B, sert kenar boşluğu 13 B.
+        let a4 = band_placement(620, 595, hard_margin_bytes(12, 600));
+        assert_eq!(
+            a4,
+            BandPlacement {
+                dst_offset: 0,
+                src_skip: 1
+            },
+            "ortalama (12 B) sert kenar boşluğunu (13 B) telafi etmeli"
+        );
+
+        // Regresyon çapası: sert kenar boşluğu düşülmezse eski, hatalı
+        // 12 baytlık kayma geri gelir.
+        assert_eq!(
+            band_placement(620, 595, 0),
+            BandPlacement {
+                dst_offset: 12,
+                src_skip: 0
+            },
+            "kenar boşluğu yoksa davranış saf ortalamadır"
+        );
+
+        // Ortalama sert kenar boşluğundan BÜYÜKSE fark hedefe kalır.
+        assert_eq!(
+            band_placement(620, 560, 13),
+            BandPlacement {
+                dst_offset: 17,
+                src_skip: 0
+            }
+        );
+
+        // Bant satırdan darsa ortalama yoktur; kenar boşluğu satırdan atılır.
+        assert_eq!(
+            band_placement(600, 620, 13),
+            BandPlacement {
+                dst_offset: 0,
+                src_skip: 13
+            }
+        );
+
+        // Satırın tamamı atlanamaz: en az bir bayt kopyalanmalı.
+        let degenerate = band_placement(4, 4, 999);
+        assert_eq!(degenerate.dst_offset, 0);
+        assert_eq!(degenerate.src_skip, 3);
+    }
+
+    /// D-06 regresyonu (uçtan uca): raster içeriği, yazıcıya giden bant
+    /// tamponunda sert kenar boşluğu düşülmüş sütunda durmalı.
+    ///
+    /// Gerçek A4 @600 DPI geometrisi kurulur (620 B bant, 595 B CUPS satırı,
+    /// `Margins[0] = 12 pt`) ve satırın 3. baytına bir işaret konur.
+    /// Beklenen sütun `3 - src_skip + dst_offset = 2`'dir; düzeltmeden önce
+    /// aynı bayt 15. sütuna (12 baytlık kayma + 3) yazılıyordu.
+    #[test]
+    fn test_content_lands_at_hard_margin_corrected_column() {
+        const MARKER_INDEX: usize = 3;
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.width_px = 4760; // 595 B/satır: gerçek cupsfilter çıktısına eşit
+        spec.margin_left_pt = 12; // PPD *ImageableArea: "12 12 583 830"
+
+        let mut pattern = vec![0u8; 595];
+        pattern[MARKER_INDEX] = 0xFF;
+        spec.line_pattern = Some(pattern);
+
+        let out = run_filter(spec.build());
+        let band = first_band_buffer(&out);
+        assert_eq!(band.len(), 620 * QPDL_BAND_HEIGHT, "bant tamponu boyutu");
+
+        let columns = nonzero_columns_in_first_line(&band, QPDL_BAND_HEIGHT);
+        assert_eq!(
+            columns,
+            vec![2],
+            "işaret baytı yanlış sütunda; 15 ise sert kenar boşluğu düşülmüyor"
+        );
+    }
+
+    /// Kenar boşluğu bildirmeyen bir akış (ör. PPD'siz üretilmiş raster) eski
+    /// saf-ortalama davranışını korumalı: düzeltme `Margins[0]`'a bağlıdır ve
+    /// alan yoksa bir şey uydurmaz.
+    #[test]
+    fn test_content_placement_without_margins_is_pure_centering() {
+        const MARKER_INDEX: usize = 3;
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.width_px = 4760;
+        spec.margin_left_pt = 0;
+
+        let mut pattern = vec![0u8; 595];
+        pattern[MARKER_INDEX] = 0xFF;
+        spec.line_pattern = Some(pattern);
+
+        let out = run_filter(spec.build());
+        let band = first_band_buffer(&out);
+        let columns = nonzero_columns_in_first_line(&band, QPDL_BAND_HEIGHT);
+        assert_eq!(columns, vec![12 + MARKER_INDEX]);
+    }
+
+    /// Yatay ve dikey eksen AYNI origin'i kullanmalı.
+    ///
+    /// Hatanın özü buydu: dikeyde hiçbir kaydırma yokken yatayda 12 baytlık
+    /// bir kaydırma vardı. SpliX'te iki eksenin de neti sıfırdır (ortalama
+    /// eksi sert kenar boşluğu). Bu test ilk raster satırının bant tamponunun
+    /// hem 0. satırında hem 0. sütununda başladığını sabitler.
+    #[test]
+    fn test_horizontal_and_vertical_origins_agree() {
+        let mut spec = RasterSpec::a4(600, 600, 8);
+        spec.width_px = 4760;
+        spec.margin_left_pt = 12;
+        // Satırın ilk baytı işaretli: src_skip = 1 olduğu için 1. bayt
+        // 0. sütuna düşer.
+        let mut pattern = vec![0u8; 595];
+        pattern[1] = 0xFF;
+        spec.line_pattern = Some(pattern);
+
+        let out = run_filter(spec.build());
+        let band = first_band_buffer(&out);
+
+        // Sütun 0, satır 0: içerik bandın sol-üst köşesinden başlar.
+        assert_eq!(band[0], 0xFF, "içerik bandın (0,0) köşesinde başlamalı");
+        assert_eq!(
+            nonzero_columns_in_first_line(&band, QPDL_BAND_HEIGHT),
+            vec![0]
         );
     }
 
