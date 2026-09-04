@@ -246,6 +246,27 @@ fn validate_page_header(header: &PageHeader) -> io::Result<()> {
         ));
     }
 
+    // D-07: `Margins[0]` da bir geometri alanıdır ve doğrulanmalıdır.
+    //
+    // Bu alan `hard_margin_bytes` üzerinden yatay yerleşimi belirler (bkz.
+    // `band_placement`), ama bugüne kadar hiç denetlenmiyordu. Doğrulanmadan
+    // geçen bir değerin iki başarısızlık kipi var: (1) devasa bir kenar
+    // boşluğu (ör. 300.000.000 pt) `hard_margin_bytes` içindeki `px + 7`
+    // toplamasını taşırır — `overflow-checks` açık yapılarda iş ortasında
+    // panik, sürüm yapılarında sessizce 0'a sarma, yani kenar boşluğu
+    // düzeltmesinin hiç uygulanmaması; (2) sayfadan geniş bir sol kenar
+    // boşluğu fiziksel olarak anlamsızdır ve satırın tamamının atlanmasına
+    // (boş sayfa) yol açar. Sol kenar boşluğu sayfanın kendisinden dar
+    // olmalıdır; PPD'nin bütün `*ImageableArea` girdilerinde bu değer 12 pt'dir.
+    // Sayfa genişliği yukarıda `MAX_POINTS` ile sınırlandığı için bu kontrol
+    // aynı zamanda taşmayı da kapatır.
+    if header.margins[0] >= header.page_size_points[0] {
+        return invalid(format!(
+            "Geçersiz sol kenar boşluğu: {} pt; sayfa genişliğinden ({} pt) küçük olmalı",
+            header.margins[0], header.page_size_points[0]
+        ));
+    }
+
     // ML-2160 serisi QPDL motoru tek düzlemli, 1-bit monokrom (K) raster
     // bekler: stream_page_bands her baytı doğrudan tek bir siyah/beyaz
     // düzlem olarak yorumlayıp koşulsuz tersliyor (bkz. o fonksiyondaki
@@ -439,16 +460,33 @@ fn band_placement(
     band_width_bytes: usize,
     cups_line_bytes: usize,
     hard_margin_bytes: usize,
-) -> BandPlacement {
+) -> io::Result<BandPlacement> {
     let centered = band_width_bytes.saturating_sub(cups_line_bytes) / 2;
-    BandPlacement {
-        dst_offset: centered.saturating_sub(hard_margin_bytes),
-        // Satırın tamamı atlanamaz: kopyalanacak en az bir bayt kalmalı,
-        // aksi hâlde tamamen boş bir sayfa üretilirdi.
-        src_skip: hard_margin_bytes
-            .saturating_sub(centered)
-            .min(cups_line_bytes.saturating_sub(1)),
+    let src_skip = hard_margin_bytes.saturating_sub(centered);
+
+    // Satırın tamamının atlanması reddedilir. Burada eskiden bir kırpma vardı
+    // (`.min(cups_line_bytes - 1)`) ve gerekçesi "boş bir sayfa üretilmesin"
+    // diye yazılmıştı; oysa boş sayfayı üreten şeyin kendisi kırpmaydı: geriye
+    // kalan tek bayt, satırdaki rastgele bir sütuna düşüyor ve sayfanın geri
+    // kalanı sessizce kayboluyordu. Sert kenar boşluğunun satır genişliğini
+    // aşması fiziksel olarak tutarsız bir geometridir; dosyanın geri kalanı
+    // (bkz. D-01/D-02) böyle bir geometriyi sessizce düzeltmek yerine
+    // reddettiği için burada da reddediyoruz.
+    if src_skip >= cups_line_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Sert kenar boşluğu ({} B) satır genişliğini ({} B) aşıyor: \
+                 bant {} B, ortalama {} B; basılacak içerik kalmıyor",
+                hard_margin_bytes, cups_line_bytes, band_width_bytes, centered
+            ),
+        ));
     }
+
+    Ok(BandPlacement {
+        dst_offset: centered.saturating_sub(hard_margin_bytes),
+        src_skip,
+    })
 }
 
 /// CUPS Raster sayfa başlığındaki duplex bilgisini QPDL duplex moduna çevirir.
@@ -849,15 +887,28 @@ fn process_cups_raster_to_spl<W: Write>(
         // CUPS raster verisi (595B) bant genişliğinde (620B) ortalanır, sonra
         // yazıcının sert kenar boşluğu düşülür; bkz. `band_placement`.
         let cups_line_bytes = header.bytes_per_line as usize;
+        let hard_margin = hard_margin_bytes(header.margins[0], header.hw_resolution[0]);
+        let placement = band_placement(band_width_bytes as usize, cups_line_bytes, hard_margin)?;
         if (band_width_bytes as usize) < cups_line_bytes {
+            // Uyarı yerleşimden SONRA basılıyor, çünkü hangi kenarın kırpıldığı
+            // `src_skip`e bağlı: bant satırdan darken sert kenar boşluğu da
+            // varsa satırın solundan bayt atılır, yani yalnızca sağ kenar
+            // kırpılmaz. Operatörü yanlış kenara yönlendirmemek için ikisi de
+            // söyleniyor.
+            let left_note = if placement.src_skip > 0 {
+                format!(
+                    " ve sert kenar boşluğu nedeniyle sol kenarından {} B atılacak",
+                    placement.src_skip
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
                 "WARNING: Hesaplanan bant genişliği ({} B) CUPS satır genişliğinden ({} B) dar; \
-                 satırların sağ kenarı kırpılacak.",
-                band_width_bytes, cups_line_bytes
+                 satırların sağ kenarı kırpılacak{}.",
+                band_width_bytes, cups_line_bytes, left_note
             );
         }
-        let hard_margin = hard_margin_bytes(header.margins[0], header.hw_resolution[0]);
-        let placement = band_placement(band_width_bytes as usize, cups_line_bytes, hard_margin);
 
         eprintln!(
             "DEBUG: QPDL Genişlik: cupsWidth={}, pageWidthPx={}, bandWidthPx={}, bandWidthB={}, \
@@ -1831,7 +1882,7 @@ mod tests {
     fn test_band_placement_subtracts_hard_margin() {
         // A4 @600 DPI, bu projenin PPD'sindeki gerçek sayılar:
         // bant 620 B, CUPS satırı 595 B, sert kenar boşluğu 13 B.
-        let a4 = band_placement(620, 595, hard_margin_bytes(12, 600));
+        let a4 = band_placement(620, 595, hard_margin_bytes(12, 600)).unwrap();
         assert_eq!(
             a4,
             BandPlacement {
@@ -1844,7 +1895,7 @@ mod tests {
         // Regresyon çapası: sert kenar boşluğu düşülmezse eski, hatalı
         // 12 baytlık kayma geri gelir.
         assert_eq!(
-            band_placement(620, 595, 0),
+            band_placement(620, 595, 0).unwrap(),
             BandPlacement {
                 dst_offset: 12,
                 src_skip: 0
@@ -1854,7 +1905,7 @@ mod tests {
 
         // Ortalama sert kenar boşluğundan BÜYÜKSE fark hedefe kalır.
         assert_eq!(
-            band_placement(620, 560, 13),
+            band_placement(620, 560, 13).unwrap(),
             BandPlacement {
                 dst_offset: 17,
                 src_skip: 0
@@ -1863,17 +1914,60 @@ mod tests {
 
         // Bant satırdan darsa ortalama yoktur; kenar boşluğu satırdan atılır.
         assert_eq!(
-            band_placement(600, 620, 13),
+            band_placement(600, 620, 13).unwrap(),
             BandPlacement {
                 dst_offset: 0,
                 src_skip: 13
             }
         );
 
-        // Satırın tamamı atlanamaz: en az bir bayt kopyalanmalı.
-        let degenerate = band_placement(4, 4, 999);
-        assert_eq!(degenerate.dst_offset, 0);
-        assert_eq!(degenerate.src_skip, 3);
+        // Satırın tamamı atlanacaksa geometri tutarsızdır: sessizce kırpmak
+        // yerine reddedilir (eskiden `src_skip` 3'e kırpılıp tek baytlık,
+        // yani fiilen boş bir sayfa üretiliyordu).
+        let err = band_placement(4, 4, 999)
+            .expect_err("satırdan geniş sert kenar boşluğu reddedilmeliydi");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Sert kenar boşluğu"), "{}", err);
+
+        // Sınır: tam olarak bir bayt kalması hâlâ kabul edilir.
+        assert_eq!(
+            band_placement(4, 4, 3).unwrap(),
+            BandPlacement {
+                dst_offset: 0,
+                src_skip: 3
+            }
+        );
+    }
+
+    /// D-07: `Margins[0]` doğrulanmadığında `hard_margin_bytes` içindeki
+    /// `px + 7` toplaması taşıyordu — `overflow-checks` açık yapılarda iş
+    /// ortasında panik, sürüm yapılarında sessizce 0'a sarma. Sayfadan geniş
+    /// bir sol kenar boşluğu artık başlık doğrulamasında reddediliyor.
+    #[test]
+    fn test_validate_page_header_rejects_out_of_page_left_margin() {
+        for margin in [595, 600, 300_000_000] {
+            let mut header = valid_header();
+            header.margins[0] = margin;
+            let err = validate_page_header(&header)
+                .expect_err("sayfadan geniş sol kenar boşluğu reddedilmeliydi");
+            assert!(
+                err.to_string().contains("Geçersiz sol kenar boşluğu"),
+                "{} pt için yanlış hata: {}",
+                margin,
+                err
+            );
+        }
+
+        // PPD'nin gerçek değeri (12 pt) ve sınırın hemen altı kabul edilmeli.
+        for margin in [0, 12, 594] {
+            let mut header = valid_header();
+            header.margins[0] = margin;
+            assert!(
+                validate_page_header(&header).is_ok(),
+                "{} pt kabul edilmeliydi",
+                margin
+            );
+        }
     }
 
     /// D-06 regresyonu (uçtan uca): raster içeriği, yazıcıya giden bant
