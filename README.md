@@ -261,7 +261,7 @@ carries no model name anywhere in its device URI.
 cargo test
 ```
 
-75 unit tests cover the CUPS Raster parser (v1/v2/v3, both endiannesses, the
+95 unit tests cover the CUPS Raster parser (v1/v2/v3, both endiannesses, the
 v2 line-RLE decoder), page-header validation, the SPL2/QPDL record layout, the
 Algo 0x11 RLE round trip, PJL field sanitisation, and every resource limit the
 filter enforces.
@@ -269,7 +269,7 @@ filter enforces.
 Several of them are pinned against measurements from real `cupsfilter` output
 rather than from the specification — `test_validate_page_header_accepts_real_cupsfilter_heights`
 carries the observed `cupsHeight` for each paper size and resolution (A4 at
-600 DPI is 6816 lines, not the 7017 the page dimensions alone suggest, because
+600 DPI is 6817 lines, not the 7017 the page dimensions alone suggest, because
 the PPD's `*ImageableArea` margins come off first). Keep that table measured,
 not computed, if you extend it.
 

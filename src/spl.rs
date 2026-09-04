@@ -8,6 +8,7 @@
 //! Lisans: GPLv2 (yalnızca v2 — SpliX kaynağıyla aynı)
 
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// PJL Universal Exit Language (UEL)
 pub const PJL_UEL: &[u8] = b"\x1b%-12345X";
@@ -18,9 +19,9 @@ pub const SUBHEADER_SIG_LE: [u8; 4] = [0xEF, 0xCD, 0xAB, 0x09];
 
 /// Algo 0x11 RLE Sıkıştırma Sabitleri
 pub const COMPRESS_SAMPLE_RATE: usize = 0x800; // 2048 bayt
-pub const TABLE_PTR_SIZE: usize = 0x40;        // 64 adet işaretçi/ofset
+pub const TABLE_PTR_SIZE: usize = 0x40; // 64 adet işaretçi/ofset
 pub const MAX_UNCOMPRESSED_BYTES: usize = 0x80; // 128 bayt
-pub const MIN_COMPRESSED_BYTES: usize = 2;     // > 2 bayt (en az 3 bayt eşleşme)
+pub const MIN_COMPRESSED_BYTES: usize = 2; // > 2 bayt (en az 3 bayt eşleşme)
 pub const MAX_COMPRESSED_BYTES: usize = 0x1FF + 3; // 514 bayt
 pub const COMPRESSION_FLAG: u8 = 0x80;
 
@@ -58,12 +59,10 @@ impl SplPaperSize {
     /// Fiziksel ölçüyü TANINAN bir QPDL kağıt koduna eşler; tablo dışındaki
     /// her ölçü için `None` döner.
     ///
-    /// `from_dimensions_pt` bunun A4'e düşen sarmalayıcısıdır. Ayrım, çağıranın
-    /// "gerçekten A4" ile "tanınmadı, A4 varsayıldı" durumlarını ayırt
-    /// edebilmesi için var: ikincisinde yazıcıya sayfanın gerçek ölçüsünden
-    /// FARKLI bir kağıt kodu gönderilir (yanlış tepsiden besleme, yanlış
-    /// hizalama), dolayısıyla sessiz kalmamalıdır — bkz. main.rs sayfa
-    /// döngüsündeki uyarı.
+    /// Bilinmeyen bir ölçü başka bir kâğıt koduna düşürülmez: QPDL sayfa
+    /// başlığındaki kâğıt kodu ile gönderilen piksel geometrisinin ayrışması
+    /// yazıcı tarafında hizalama ve besleme hatalarına yol açabilir. Çağıran
+    /// taraf `None` sonucunu işi reddederek ele almalıdır.
     pub fn from_dimensions_pt_exact(width_pt: u32, height_pt: u32) -> Option<Self> {
         Some(match (width_pt, height_pt) {
             (595, 842) | (842, 595) => SplPaperSize::A4,
@@ -90,17 +89,6 @@ impl SplPaperSize {
             (459, 649) | (649, 459) => SplPaperSize::C5,
             _ => return None,
         })
-    }
-
-    /// Fiziksel ölçüyü QPDL kağıt koduna eşler; tanınmayan ölçü A4'e düşer.
-    ///
-    /// Geri düşüş kasıtlı: bilinmeyen bir ölçüde işi reddetmek yerine yazıcının
-    /// kesinlikle tanıdığı bir koda düşmek, `Custom` (21) gibi bu motor
-    /// ailesinde doğrulanmamış bir kodu denemekten daha güvenli. Ama geri
-    /// düşüşün GERÇEKLEŞTİĞİ çağıran tarafından görülebilmelidir; bunun için
-    /// `from_dimensions_pt_exact` kullanılır.
-    pub fn from_dimensions_pt(width_pt: u32, height_pt: u32) -> Self {
-        Self::from_dimensions_pt_exact(width_pt, height_pt).unwrap_or(SplPaperSize::A4)
     }
 }
 
@@ -163,14 +151,28 @@ impl SplResolution {
         }
     }
 
-    pub fn from_dpi(dpi: u32) -> Self {
-        if dpi >= 1200 {
-            SplResolution::Dpi1200
-        } else if dpi >= 600 {
-            SplResolution::Dpi600
-        } else {
-            SplResolution::Dpi300
+    /// Bir DPI değerini yalnızca QPDL'nin bu sürücüde desteklediği kesin
+    /// değerlerden biriyse dönüştürür. Yakındaki değere yuvarlama yapılmaz;
+    /// aksi hâlde raster geometrisi örneğin 599 DPI ile hesaplanırken QPDL
+    /// başlığı 300 DPI diyebilir.
+    pub fn from_dpi_exact(dpi: u32) -> Option<Self> {
+        match dpi {
+            300 => Some(SplResolution::Dpi300),
+            600 => Some(SplResolution::Dpi600),
+            1200 => Some(SplResolution::Dpi1200),
+            _ => None,
         }
+    }
+
+    /// PPD'nin ve ML-2160 ailesi için doğrulanmış QPDL modlarının sunduğu
+    /// çözünürlük çiftlerini denetler. Eksenleri ayrı ayrı doğrulamak yeterli
+    /// değildir: örneğin 600x1200 iki tanınan eksenden oluşsa da sunulan bir
+    /// yazıcı modu değildir.
+    pub fn pair_is_supported(x_dpi: u32, y_dpi: u32) -> bool {
+        matches!(
+            (x_dpi, y_dpi),
+            (300, 300) | (600, 600) | (1200, 600) | (1200, 1200)
+        )
     }
 }
 
@@ -254,6 +256,36 @@ pub fn pjl_paper_type(name: &str) -> Option<&'static str> {
         .copied()
 }
 
+/// Unix çağından itibaren geçen tam gün sayısını Gregoryen takvim tarihine
+/// çevirir. Algoritma yalnızca tam sayı aritmetiği kullanır; böylece filtre,
+/// güncel servis tarihini üretmek için bir saat/tarih bağımlılığı taşımaz.
+fn service_date_from_unix_days(days_since_epoch: i64) -> String {
+    let z = days_since_epoch + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+
+    format!("{year:04}{month:02}{day:02}")
+}
+
+/// Geçerli UTC tarihini Samsung PJL'nin `YYYYMMDD` servis tarihi biçiminde
+/// döndürür. Sistem saati Unix çağından önceyse güvenli ve geçerli bir taban
+/// tarihi kullanılır.
+pub fn current_service_date() -> String {
+    let days_since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| (duration.as_secs() / 86_400) as i64)
+        .unwrap_or(0);
+    service_date_from_unix_days(days_since_epoch)
+}
+
 /// İş Konfigürasyonu
 #[derive(Debug, Clone)]
 pub struct JobConfig {
@@ -274,7 +306,7 @@ impl Default for JobConfig {
         Self {
             job_name: "CUPS Document".to_string(),
             user_name: "guest".to_string(),
-            service_date: "20120101".to_string(),
+            service_date: current_service_date(),
             duplex: SplDuplex::Simplex,
             paper_type: PJL_PAPERTYPE_DEFAULT,
         }
@@ -336,8 +368,8 @@ impl Default for PageConfig {
             duplex: SplDuplex::Simplex,
             page_number: 1,
             copies: 1,
-            width_pixels: 4768,
-            height_pixels: 6816,
+            width_pixels: 4758,
+            height_pixels: 6817,
             qpdl_version: 3,
         }
     }
@@ -434,9 +466,7 @@ impl Algo0x11 {
         let uncomp_size_u32 = uncomp_size as u32;
         out[0..4].copy_from_slice(&uncomp_size_u32.to_le_bytes());
 
-        for i in 0..uncomp_size {
-            out.push(data[i]);
-        }
+        out.extend_from_slice(&data[..uncomp_size]);
 
         let mut r = uncomp_size;
         let mut raw_data_counter: usize = 0;
@@ -539,9 +569,9 @@ impl Algo0x11 {
     pub fn decompress(data: &[u8]) -> Vec<u8> {
         let uncomp_size = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
         let mut ptr_array = [0u16; TABLE_PTR_SIZE];
-        for i in 0..TABLE_PTR_SIZE {
+        for (i, ptr) in ptr_array.iter_mut().enumerate() {
             let off = 4 + i * 2;
-            ptr_array[i] = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+            *ptr = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
         }
         let table_end = 4 + TABLE_PTR_SIZE * 2;
         let mut out = Vec::new();
@@ -615,15 +645,24 @@ fn is_safe_pjl_ascii(c: char) -> bool {
 fn ascii_fold(c: char) -> Option<&'static str> {
     Some(match c {
         // --- Türkçe ---
-        'ç' => "c", 'Ç' => "C",
-        'ğ' => "g", 'Ğ' => "G",
-        'ı' => "i", 'İ' => "I",
-        'ö' => "o", 'Ö' => "O",
-        'ş' => "s", 'Ş' => "S",
-        'ü' => "u", 'Ü' => "U",
-        'â' => "a", 'Â' => "A",
-        'î' => "i", 'Î' => "I",
-        'û' => "u", 'Û' => "U",
+        'ç' => "c",
+        'Ç' => "C",
+        'ğ' => "g",
+        'Ğ' => "G",
+        'ı' => "i",
+        'İ' => "I",
+        'ö' => "o",
+        'Ö' => "O",
+        'ş' => "s",
+        'Ş' => "S",
+        'ü' => "u",
+        'Ü' => "U",
+        'â' => "a",
+        'Â' => "A",
+        'î' => "i",
+        'Î' => "I",
+        'û' => "u",
+        'Û' => "U",
         // --- Yaygın Batı Avrupa harfleri ---
         'á' | 'à' | 'ä' | 'ã' | 'å' => "a",
         'Á' | 'À' | 'Ä' | 'Ã' | 'Å' => "A",
@@ -635,37 +674,65 @@ fn ascii_fold(c: char) -> Option<&'static str> {
         'Ó' | 'Ò' | 'Ô' | 'Õ' | 'Ø' => "O",
         'ú' | 'ù' => "u",
         'Ú' | 'Ù' => "U",
-        'ñ' => "n", 'Ñ' => "N",
-        'ý' | 'ÿ' => "y", 'Ý' => "Y",
-        'ð' => "d", 'Ð' => "D",
-        'þ' => "th", 'Þ' => "TH",
-        'æ' => "ae", 'Æ' => "AE",
+        'ñ' => "n",
+        'Ñ' => "N",
+        'ý' | 'ÿ' => "y",
+        'Ý' => "Y",
+        'ð' => "d",
+        'Ð' => "D",
+        'þ' => "th",
+        'Þ' => "TH",
+        'æ' => "ae",
+        'Æ' => "AE",
         'ß' => "ss",
         // --- Orta/Doğu Avrupa (Latin Extended-A/B) ---
-        'ć' | 'č' | 'ĉ' | 'ċ' => "c", 'Ć' | 'Č' | 'Ĉ' | 'Ċ' => "C",
-        'ś' | 'š' | 'ș' | 'ŝ' => "s", 'Ś' | 'Š' | 'Ș' | 'Ŝ' => "S",
-        'ź' | 'ż' | 'ž' => "z", 'Ź' | 'Ż' | 'Ž' => "Z",
-        'ł' | 'ĺ' | 'ľ' => "l", 'Ł' | 'Ĺ' | 'Ľ' => "L",
-        'ń' | 'ň' | 'ņ' => "n", 'Ń' | 'Ň' | 'Ņ' => "N",
-        'đ' | 'ď' => "d", 'Đ' | 'Ď' => "D",
-        'ť' | 'ţ' | 'ț' => "t", 'Ť' | 'Ţ' | 'Ț' => "T",
-        'ř' | 'ŕ' => "r", 'Ř' | 'Ŕ' => "R",
-        'ě' | 'ē' | 'ė' | 'ę' | 'ĕ' => "e", 'Ě' | 'Ē' | 'Ė' | 'Ę' | 'Ĕ' => "E",
-        'ā' | 'ă' | 'ą' => "a", 'Ā' | 'Ă' | 'Ą' => "A",
-        'ī' | 'ĭ' | 'į' | 'ĩ' => "i", 'Ī' | 'Ĭ' | 'Į' | 'Ĩ' => "I",
-        'ō' | 'ŏ' | 'ő' => "o", 'Ō' | 'Ŏ' | 'Ő' => "O",
-        'ū' | 'ů' | 'ű' | 'ų' | 'ũ' | 'ŭ' => "u", 'Ū' | 'Ů' | 'Ű' | 'Ų' | 'Ũ' => "U",
-        'ġ' | 'ģ' => "g", 'Ġ' | 'Ģ' => "G",
-        'ķ' => "k", 'Ķ' => "K",
-        'ŷ' => "y", 'Ŷ' | 'Ÿ' => "Y",
-        'ŵ' => "w", 'Ŵ' => "W",
-        'ĵ' => "j", 'Ĵ' => "J",
-        'ħ' | 'ĥ' => "h", 'Ħ' | 'Ĥ' => "H",
-        'œ' => "oe", 'Œ' => "OE",
-        'ŀ' => "l", 'Ŀ' => "L",
+        'ć' | 'č' | 'ĉ' | 'ċ' => "c",
+        'Ć' | 'Č' | 'Ĉ' | 'Ċ' => "C",
+        'ś' | 'š' | 'ș' | 'ŝ' => "s",
+        'Ś' | 'Š' | 'Ș' | 'Ŝ' => "S",
+        'ź' | 'ż' | 'ž' => "z",
+        'Ź' | 'Ż' | 'Ž' => "Z",
+        'ł' | 'ĺ' | 'ľ' => "l",
+        'Ł' | 'Ĺ' | 'Ľ' => "L",
+        'ń' | 'ň' | 'ņ' => "n",
+        'Ń' | 'Ň' | 'Ņ' => "N",
+        'đ' | 'ď' => "d",
+        'Đ' | 'Ď' => "D",
+        'ť' | 'ţ' | 'ț' => "t",
+        'Ť' | 'Ţ' | 'Ț' => "T",
+        'ř' | 'ŕ' => "r",
+        'Ř' | 'Ŕ' => "R",
+        'ě' | 'ē' | 'ė' | 'ę' | 'ĕ' => "e",
+        'Ě' | 'Ē' | 'Ė' | 'Ę' | 'Ĕ' => "E",
+        'ā' | 'ă' | 'ą' => "a",
+        'Ā' | 'Ă' | 'Ą' => "A",
+        'ī' | 'ĭ' | 'į' | 'ĩ' => "i",
+        'Ī' | 'Ĭ' | 'Į' | 'Ĩ' => "I",
+        'ō' | 'ŏ' | 'ő' => "o",
+        'Ō' | 'Ŏ' | 'Ő' => "O",
+        'ū' | 'ů' | 'ű' | 'ų' | 'ũ' | 'ŭ' => "u",
+        'Ū' | 'Ů' | 'Ű' | 'Ų' | 'Ũ' => "U",
+        'ġ' | 'ģ' => "g",
+        'Ġ' | 'Ģ' => "G",
+        'ķ' => "k",
+        'Ķ' => "K",
+        'ŷ' => "y",
+        'Ŷ' | 'Ÿ' => "Y",
+        'ŵ' => "w",
+        'Ŵ' => "W",
+        'ĵ' => "j",
+        'Ĵ' => "J",
+        'ħ' | 'ĥ' => "h",
+        'Ħ' | 'Ĥ' => "H",
+        'œ' => "oe",
+        'Œ' => "OE",
+        'ŀ' => "l",
+        'Ŀ' => "L",
         'ŉ' => "n",
-        'ŧ' => "t", 'Ŧ' => "T",
-        'ĳ' => "ij", 'Ĳ' => "IJ",
+        'ŧ' => "t",
+        'Ŧ' => "T",
+        'ĳ' => "ij",
+        'Ĳ' => "IJ",
         // --- Tipografik noktalama ---
         '\u{2018}' | '\u{2019}' => "'",
         // Eğri çift tırnaklar BOŞ dizeye katlanır, düz `"`'ye değil: düz tırnak
@@ -853,6 +920,7 @@ impl<W: Write> SplStreamWriter<W> {
         header[0x7..0x9].copy_from_slice(&config.height_pixels.to_be_bytes());
         header[0x9] = config.paper_source as u8; // Auto = 1
         header[0xA] = 0x00; // unknownByte1
+
         // SpliX qpdl.cpp renderPage, duplex/tumble baytları:
         //
         //   Simplex         : duplex = 1, tumble = 0
@@ -868,9 +936,7 @@ impl<W: Write> SplStreamWriter<W> {
         // yani tek numaralı sayfalarda 1, çift numaralılarda 0 olur.
         header[0xB] = match config.duplex {
             SplDuplex::Simplex | SplDuplex::LongEdge => 1,
-            SplDuplex::ShortEdge
-            | SplDuplex::ManualLongEdge
-            | SplDuplex::ManualShortEdge => 0,
+            SplDuplex::ShortEdge | SplDuplex::ManualLongEdge | SplDuplex::ManualShortEdge => 0,
         };
         header[0xC] = match config.duplex {
             SplDuplex::Simplex => 0,
@@ -918,13 +984,13 @@ impl<W: Write> SplStreamWriter<W> {
         // Toplam veri boyutu: payload + 4 (sub-header sig) + 4 (checksum)
         let total_data_size = (payload_bytes.len() + 8) as u32;
 
-        // QPDL bant sırası alanı 8 bitliktir. Bugün taşması imkânsız: en kötü
-        // durum, doğrulayıcının kabul ettiği en büyük sayfada (1300 pt @1200
-        // DPI => 21667 satır) 128 satırlık bantlarla 170 bant eder. Ama bu,
-        // `MAX_POINTS` ya da `QPDL_BAND_HEIGHT` değiştiğinde sessizce bozulacak
-        // ÖRTÜK bir invaryanttı: `wrapping_add` 256. bantta sırayı 0'a
-        // döndürüp yazıcıya aynı sıra numarasını ikinci kez bildirirdi.
-        // Artık invaryant örtük değil, uygulanıyor.
+        // QPDL bant sırası alanı 8 bitliktir. Bugün taşması imkânsız: kabul
+        // edilen en büyük sayfada (Legal @1200 DPI => 16800 satır) 128
+        // satırlık bantlarla 132 bant eder. Ama kâğıt tablosu ya da
+        // `QPDL_BAND_HEIGHT` değiştiğinde sessizce bozulabilecek ÖRTÜK bir
+        // invaryanttı: `wrapping_add` 256. bantta sırayı 0'a döndürüp yazıcıya
+        // aynı sıra numarasını ikinci kez bildirirdi. Artık invaryant örtük
+        // değil, uygulanıyor.
         let band_index = u8::try_from(self.current_band).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1065,17 +1131,49 @@ mod tests {
         }
     }
 
-    /// Tanınan bir A4 ile "tanınmadı, A4'e düşüldü" durumu ayırt edilebilmeli;
-    /// çağıran taraf ikincisini uyarı olarak bildiriyor (bkz. main.rs).
+    /// Tanınmayan bir ölçü A4'e ya da başka bir QPDL koduna düşürülmemeli.
     #[test]
-    fn test_unknown_paper_size_is_distinguishable_from_real_a4() {
+    fn test_unknown_paper_size_is_rejected_instead_of_falling_back_to_a4() {
         assert_eq!(
             SplPaperSize::from_dimensions_pt_exact(595, 842),
             Some(SplPaperSize::A4)
         );
         assert_eq!(SplPaperSize::from_dimensions_pt_exact(612, 936), None);
-        // Sarmalayıcının geri düşüşü değişmedi.
-        assert_eq!(SplPaperSize::from_dimensions_pt(612, 936), SplPaperSize::A4);
+    }
+
+    /// DPI dönüşümü yaklaşık değerleri sessizce 300/600/1200'e yuvarlamamalı;
+    /// yalnızca PPD'nin sunduğu eksen değerleri ve doğrulanmış çiftler geçerli.
+    #[test]
+    fn test_resolution_mapping_is_exact_and_pair_aware() {
+        assert_eq!(
+            SplResolution::from_dpi_exact(300),
+            Some(SplResolution::Dpi300)
+        );
+        assert_eq!(
+            SplResolution::from_dpi_exact(600),
+            Some(SplResolution::Dpi600)
+        );
+        assert_eq!(
+            SplResolution::from_dpi_exact(1200),
+            Some(SplResolution::Dpi1200)
+        );
+        for unsupported in [0, 299, 599, 601, 1199, 1201] {
+            assert_eq!(SplResolution::from_dpi_exact(unsupported), None);
+        }
+
+        assert!(SplResolution::pair_is_supported(300, 300));
+        assert!(SplResolution::pair_is_supported(600, 600));
+        assert!(SplResolution::pair_is_supported(1200, 600));
+        assert!(SplResolution::pair_is_supported(1200, 1200));
+        assert!(!SplResolution::pair_is_supported(600, 1200));
+        assert!(!SplResolution::pair_is_supported(300, 600));
+    }
+
+    #[test]
+    fn test_service_date_conversion_handles_epoch_and_leap_day() {
+        assert_eq!(service_date_from_unix_days(-1), "19691231");
+        assert_eq!(service_date_from_unix_days(0), "19700101");
+        assert_eq!(service_date_from_unix_days(11_016), "20000229");
     }
 
     /// Sıkıştırıcı payload üretemezse bant kaydı BOŞ payload'la yazılmamalı.
@@ -1169,7 +1267,11 @@ mod tests {
                 _ => missing.push(format!("U+{:04X} ({})", cp, c)),
             }
         }
-        assert!(missing.is_empty(), "katlanamayan Latin-1 harfleri: {:?}", missing);
+        assert!(
+            missing.is_empty(),
+            "katlanamayan Latin-1 harfleri: {:?}",
+            missing
+        );
     }
 
     /// Katlama tablosunun HER çıktısı yazdırılabilir ASCII olmalı ve alanı
@@ -1343,7 +1445,10 @@ mod tests {
 
     /// Akıştaki UEL (yeni PJL zarfı) sayısını döner.
     fn count_uel(stream: &[u8]) -> usize {
-        stream.windows(PJL_UEL.len()).filter(|w| *w == PJL_UEL).count()
+        stream
+            .windows(PJL_UEL.len())
+            .filter(|w| *w == PJL_UEL)
+            .count()
     }
 
     /// Y-03 regresyonu: `begin_job` çağrıldıktan sonra `end_job` çağrılmadan
@@ -1433,8 +1538,14 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         SplStreamWriter::new(&mut out).begin_page(&cfg).unwrap();
 
-        assert_eq!(out[0x1], 6, "header[0x1] DİKEY (Y) çözünürlük olmalı: 600/100");
-        assert_eq!(out[0x10], 12, "header[0x10] YATAY (X) çözünürlük olmalı: 1200/100");
+        assert_eq!(
+            out[0x1], 6,
+            "header[0x1] DİKEY (Y) çözünürlük olmalı: 600/100"
+        );
+        assert_eq!(
+            out[0x10], 12,
+            "header[0x10] YATAY (X) çözünürlük olmalı: 1200/100"
+        );
 
         // Ters yön: eksenlerin gerçekten ayrı taşındığını kanıtlar.
         let swapped = PageConfig {
@@ -1443,12 +1554,18 @@ mod tests {
             ..PageConfig::default()
         };
         let mut out2: Vec<u8> = Vec::new();
-        SplStreamWriter::new(&mut out2).begin_page(&swapped).unwrap();
+        SplStreamWriter::new(&mut out2)
+            .begin_page(&swapped)
+            .unwrap();
         assert_eq!(out2[0x1], 12);
         assert_eq!(out2[0x10], 6);
 
         // Simetrik durumda iki bayt eşit (eski davranışla uyum).
-        for dpi in [SplResolution::Dpi300, SplResolution::Dpi600, SplResolution::Dpi1200] {
+        for dpi in [
+            SplResolution::Dpi300,
+            SplResolution::Dpi600,
+            SplResolution::Dpi1200,
+        ] {
             let sym = PageConfig {
                 resolution_x: dpi,
                 resolution_y: dpi,
@@ -1466,14 +1583,37 @@ mod tests {
     /// sessizce bir koda dönüşmek yerine `None` verir.
     #[test]
     fn test_paper_source_from_media_position() {
-        assert_eq!(SplPaperSource::from_media_position(0), Some(SplPaperSource::Auto));
-        assert_eq!(SplPaperSource::from_media_position(1), Some(SplPaperSource::Auto));
-        assert_eq!(SplPaperSource::from_media_position(2), Some(SplPaperSource::Manual));
-        assert_eq!(SplPaperSource::from_media_position(3), Some(SplPaperSource::Multi));
-        assert_eq!(SplPaperSource::from_media_position(4), Some(SplPaperSource::Upper));
-        assert_eq!(SplPaperSource::from_media_position(5), Some(SplPaperSource::Lower));
+        assert_eq!(
+            SplPaperSource::from_media_position(0),
+            Some(SplPaperSource::Auto)
+        );
+        assert_eq!(
+            SplPaperSource::from_media_position(1),
+            Some(SplPaperSource::Auto)
+        );
+        assert_eq!(
+            SplPaperSource::from_media_position(2),
+            Some(SplPaperSource::Manual)
+        );
+        assert_eq!(
+            SplPaperSource::from_media_position(3),
+            Some(SplPaperSource::Multi)
+        );
+        assert_eq!(
+            SplPaperSource::from_media_position(4),
+            Some(SplPaperSource::Upper)
+        );
+        assert_eq!(
+            SplPaperSource::from_media_position(5),
+            Some(SplPaperSource::Lower)
+        );
         for unknown in [6u32, 7, 99, u32::MAX] {
-            assert_eq!(SplPaperSource::from_media_position(unknown), None, "{}", unknown);
+            assert_eq!(
+                SplPaperSource::from_media_position(unknown),
+                None,
+                "{}",
+                unknown
+            );
         }
         // Kodlar QPDL sayfa başlığına ham olarak yazıldığı için sayısal
         // değerleri de sabitlensin.
@@ -1535,9 +1675,7 @@ mod tests {
     #[test]
     fn test_algo0x11_compression() {
         let mut sample = vec![0x00u8; 620 * 64];
-        for i in 100..500 {
-            sample[i] = 0xAA;
-        }
+        sample[100..500].fill(0xAA);
         let comp = Algo0x11::compress(&sample).unwrap();
         assert!(comp.len() < sample.len());
     }
@@ -1548,10 +1686,8 @@ mod tests {
         let mut sample = vec![0u8; 620 * 128];
         for (i, b) in sample.iter_mut().enumerate() {
             *b = ((i * 37 + (i / 620) * 13) % 251) as u8;
-        }
-        for i in 0..sample.len() {
             if (i / 620) % 5 == 0 && (i % 620) > 50 && (i % 620) < 400 {
-                sample[i] = 0xFF;
+                *b = 0xFF;
             }
         }
         let comp = Algo0x11::compress(&sample).unwrap();
@@ -1632,7 +1768,10 @@ mod tests {
             decomp.len(),
             band_data.len()
         );
-        let first_diff = decomp.iter().zip(band_data.iter()).position(|(a, b)| a != b);
+        let first_diff = decomp
+            .iter()
+            .zip(band_data.iter())
+            .position(|(a, b)| a != b);
         assert_eq!(
             first_diff, None,
             "decompressed content differs from original at byte offset {:?}",

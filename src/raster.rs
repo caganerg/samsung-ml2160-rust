@@ -79,28 +79,28 @@ impl CupsRasterVersion {
 /// CUPS Renk Uzayları (`cups_cspace_e`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CupsColorSpace {
-    W,          // 0: Luminance / Gri tonlama (0 = Beyaz)
-    Rgb,        // 1: Standart RGB
-    Rgba,       // 2: RGB + Alpha
-    K,          // 3: Siyah-Beyaz / Siyah-Tonlama (0 = Siyah, Samsung lazer için ideal)
-    Cmy,        // 4: Cyan, Magenta, Yellow
-    Cmyk,       // 5: Cyan, Magenta, Yellow, Black
-    Ymc,        // 6
-    Ymck,       // 7
-    Kcmy,       // 8
-    Kcmycm,     // 9
-    Gmck,       // 10
-    Gmcs,       // 11
-    White,      // 12
-    Gold,       // 13
-    Silver,     // 14
-    CieXyz,     // 15
-    CieLab,     // 16
-    Rgbw,       // 17
-    Sw,         // 18: sRGB Tabanlı Gri tonlama (DeviceGray)
-    Srgb,       // 19: sRGB Renkli
-    AdobeRgb,   // 20: Adobe RGB
-    Device1,    // 32..47: Cihaza özel renk kanalları
+    W,        // 0: Luminance / Gri tonlama (0 = Beyaz)
+    Rgb,      // 1: Standart RGB
+    Rgba,     // 2: RGB + Alpha
+    K,        // 3: Siyah-Beyaz / Siyah-Tonlama (0 = Siyah, Samsung lazer için ideal)
+    Cmy,      // 4: Cyan, Magenta, Yellow
+    Cmyk,     // 5: Cyan, Magenta, Yellow, Black
+    Ymc,      // 6
+    Ymck,     // 7
+    Kcmy,     // 8
+    Kcmycm,   // 9
+    Gmck,     // 10
+    Gmcs,     // 11
+    White,    // 12
+    Gold,     // 13
+    Silver,   // 14
+    CieXyz,   // 15
+    CieLab,   // 16
+    Rgbw,     // 17
+    Sw,       // 18: sRGB Tabanlı Gri tonlama (DeviceGray)
+    Srgb,     // 19: sRGB Renkli
+    AdobeRgb, // 20: Adobe RGB
+    Device1,  // 32..47: Cihaza özel renk kanalları
     Device2,
     Device3,
     Device4,
@@ -221,12 +221,12 @@ pub struct PageHeader {
     pub collate: bool,
     pub cut_media: u32,
     pub duplex: bool,
-    pub hw_resolution: [u32; 2],       // [X DPI, Y DPI]
+    pub hw_resolution: [u32; 2],        // [X DPI, Y DPI]
     pub imaging_bounding_box: [u32; 4], // [Left, Bottom, Right, Top] (pt)
     pub insert_sheet: bool,
     pub jog: u32,
     pub leading_edge: u32,
-    pub margins: [u32; 2],             // [Left, Bottom] (pt)
+    pub margins: [u32; 2], // [Left, Bottom] (pt)
     pub manual_feed: bool,
     pub media_position: u32,
     pub media_weight: u32,
@@ -235,7 +235,7 @@ pub struct PageHeader {
     pub num_copies: u32,
     pub orientation: u32,
     pub output_face_up: bool,
-    pub page_size_points: [u32; 2],    // [Width, Length] (1/72 inch points)
+    pub page_size_points: [u32; 2], // [Width, Length] (1/72 inch points)
     pub separations: bool,
     pub tray_switch: bool,
     /// `Tumble` — CUPS'un çift taraflı baskıda BAĞLAMA KENARINI bildirdiği
@@ -254,15 +254,15 @@ pub struct PageHeader {
     /// paritesinden hesaplanır (bkz. spl.rs `begin_page`).
     pub tumble: bool,
 
-    pub width: u32,                    // cupsWidth (piksel)
-    pub height: u32,                   // cupsHeight (piksel)
+    pub width: u32,  // cupsWidth (piksel)
+    pub height: u32, // cupsHeight (piksel)
     pub cups_media_type: u32,
-    pub bits_per_color: u32,           // cupsBitsPerColor (1, 8, 16)
-    pub bits_per_pixel: u32,           // cupsBitsPerPixel (1, 8, 24, 32)
-    pub bytes_per_line: u32,           // cupsBytesPerLine
-    pub color_order: CupsColorOrder,   // cupsColorOrder
-    pub color_space: CupsColorSpace,   // cupsColorSpace
-    pub compression: u32,              // cupsCompression (0 = uncompressed)
+    pub bits_per_color: u32,         // cupsBitsPerColor (1, 8, 16)
+    pub bits_per_pixel: u32,         // cupsBitsPerPixel (1, 8, 24, 32)
+    pub bytes_per_line: u32,         // cupsBytesPerLine
+    pub color_order: CupsColorOrder, // cupsColorOrder
+    pub color_space: CupsColorSpace, // cupsColorSpace
+    pub compression: u32,            // cupsCompression (0 = uncompressed)
     pub row_count: u32,
     pub row_feed: u32,
     pub row_step: u32,
@@ -382,11 +382,19 @@ impl PageHeader {
 
             // cupsRenderingIntent: 1668..1732
             let intent_raw = Self::parse_c_string(&buf[1668..1732]);
-            let intent = if intent_raw.is_empty() { None } else { Some(intent_raw) };
+            let intent = if intent_raw.is_empty() {
+                None
+            } else {
+                Some(intent_raw)
+            };
 
             // cupsPageSizeName: 1732..1796
             let name_raw = Self::parse_c_string(&buf[1732..1796]);
-            let name = if name_raw.is_empty() { None } else { Some(name_raw) };
+            let name = if name_raw.is_empty() {
+                None
+            } else {
+                Some(name_raw)
+            };
 
             (num_colors, [ps_w_f, ps_h_f], intent, name)
         } else {
@@ -685,19 +693,43 @@ impl CupsLineDecoder {
 
             if n > 128 {
                 // (257 - n) piksellik ham kopya: n=255 -> 2, n=129 -> 128.
-                let count = ((257 - n as usize) * bpp).min(line_len - pos);
+                let count = (257 - n as usize).checked_mul(bpp).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "CUPS v2 literal kayıt uzunluğu taşma oluşturdu",
+                    )
+                })?;
+                if count > line_len - pos {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "CUPS v2 literal kayıt satır sınırını aşıyor: kalan {} bayt, kayıt {} bayt",
+                            line_len - pos,
+                            count
+                        ),
+                    ));
+                }
                 reader.read_exact(&mut self.last_line[pos..pos + count])?;
                 pos += count;
                 continue;
             }
 
             // Sonraki tek piksel (n + 1) kez yinelenir.
-            let count = ((n as usize + 1) * bpp).min(line_len - pos);
-            if count < bpp {
-                // libcups burada satırı yarıda bırakır; kalanı önceki
-                // içerikten kalmasın diye boş renkle dolduruyoruz.
-                self.last_line[pos..].fill(self.blank_fill);
-                return Ok(());
+            let count = (n as usize + 1).checked_mul(bpp).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "CUPS v2 tekrar kayıt uzunluğu taşma oluşturdu",
+                )
+            })?;
+            if count > line_len - pos {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "CUPS v2 tekrar kaydı satır sınırını aşıyor: kalan {} bayt, kayıt {} bayt",
+                        line_len - pos,
+                        count
+                    ),
+                ));
             }
 
             reader.read_exact(&mut self.last_line[pos..pos + bpp])?;
@@ -705,9 +737,7 @@ impl CupsLineDecoder {
             let pixel = &written[pos..pos + bpp];
             let repeats = count / bpp - 1;
             for chunk in rest.chunks_mut(bpp).take(repeats) {
-                // Son yineleme kısmi bir piksel olabilir; `chunk` kadarını al.
-                let take = chunk.len().min(bpp);
-                chunk[..take].copy_from_slice(&pixel[..take]);
+                chunk.copy_from_slice(pixel);
             }
             pos += count;
         }
@@ -852,7 +882,10 @@ mod tests {
                 reader.read_line(&mut line).unwrap();
             }
         }
-        assert!(reader.next_page_header().unwrap().is_none(), "akış temiz bitmeli");
+        assert!(
+            reader.next_page_header().unwrap().is_none(),
+            "akış temiz bitmeli"
+        );
     }
 
     /// Altı sync sözcüğü de kabul edilmeli; sıkıştırma bayrağı doğru kurulmalı.
@@ -915,7 +948,9 @@ mod tests {
     /// bu dosyadan bire bir okudum.
     #[test]
     fn test_v2_decodes_real_libcups_payload() {
-        let payload = [0xc7, 0x7f, 0x00, 0x7f, 0x00, 0x7f, 0x00, 0x7f, 0x00, 0x6b, 0x00];
+        let payload = [
+            0xc7, 0x7f, 0x00, 0x7f, 0x00, 0x7f, 0x00, 0x7f, 0x00, 0x6b, 0x00,
+        ];
         let lines = decode_v2(620, 200, &payload);
         assert_eq!(lines.len(), 200);
         for (i, line) in lines.iter().enumerate() {
@@ -970,25 +1005,31 @@ mod tests {
         assert_eq!(line[0], 0xBB, "önceki sayfanın tekrar sayacı sızdı");
     }
 
-    /// Bildirilen uzunluğu aşan sayaçlar satır sınırında kırpılmalı, taşmamalı.
+    /// Bildirilen satırı aşan sayaçlar kırpılmamalı: kırpma, bir sonraki
+    /// kaydın baytlarını kontrol baytı sanıp bütün akışın kaymasına yol açar.
     #[test]
-    fn test_v2_oversized_counts_are_clamped_to_line() {
-        // [0x7F] = 128 piksellik tekrar, ama satır yalnızca 4 bayt.
-        let lines = decode_v2(4, 1, &[0x00, 0x7F, 0x5A]);
-        assert_eq!(lines[0], vec![0x5A; 4]);
+    fn test_v2_oversized_counts_are_rejected() {
+        for payload in [
+            vec![0x00, 0x7F, 0x5A],
+            vec![0x00, 0x81, 0x11, 0x22, 0x33, 0x44],
+        ] {
+            let mut reader = CupsRasterReader::new(Cursor::new(v2_page(4, 1, &payload))).unwrap();
+            reader.next_page_header().unwrap().unwrap();
 
-        // [0x81] = 128 baytlık ham kopya, satır yine 4 bayt.
-        let mut payload = vec![0x00, 0x81];
-        payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
-        let lines = decode_v2(4, 1, &payload);
-        assert_eq!(lines[0], vec![0x11, 0x22, 0x33, 0x44]);
+            let mut line = vec![0u8; 4];
+            let err = reader
+                .read_line(&mut line)
+                .expect_err("satırı aşan v2 kaydı reddedilmeliydi");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("satır sınırını"), "{}", err);
+        }
     }
 
     /// Yarıda kesilen bir v2 akışı hata döndürmeli, panic atmamalı.
     #[test]
     fn test_v2_truncated_payload_errors_cleanly() {
-        let mut reader = CupsRasterReader::new(Cursor::new(v2_page(620, 10, &[0x00, 0x7F])))
-            .unwrap();
+        let mut reader =
+            CupsRasterReader::new(Cursor::new(v2_page(620, 10, &[0x00, 0x7F]))).unwrap();
         reader.next_page_header().unwrap().unwrap();
         let mut line = vec![0u8; 620];
         assert!(reader.read_line(&mut line).is_err());
