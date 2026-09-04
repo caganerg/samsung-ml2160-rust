@@ -117,7 +117,7 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 
 REPO=$PWD
-VERSION=1.0.1-1
+VERSION=1.0.2-1
 DOC=usr/share/doc/samsung-ml2160-rust
 BUILD=$(mktemp -d)
 mkdir -p "$BUILD"/root/usr/lib/cups/filter \
@@ -156,7 +156,7 @@ what makes the installed filter root-owned regardless of who built the package.
 ### Install it and register the queue
 
 ```sh
-sudo apt install ./dist/samsung-ml2160-rust_1.0.1-1_amd64.deb
+sudo apt install ./dist/samsung-ml2160-rust_1.0.2-1_amd64.deb
 sudo lpadmin -p ML2160_Rust -E -v "$DEVICE_URI" \
     -P /usr/share/ppd/samsung-ml2160-rust/samsung-ml2160.ppd
 ```

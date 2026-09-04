@@ -1,3 +1,9 @@
+samsung-ml2160-rust (1.0.2-1) stable; urgency=medium
+
+  * Release version 1.0.2.
+
+ -- CUPS Raster Filter Developer <caganergun@tutanota.com>  Fri, 04 Sep 2026 23:59:35 +0300
+
 samsung-ml2160-rust (1.0.1-1) stable; urgency=medium
 
   * Initial Debian package: statically linked (musl) filter binary plus the
