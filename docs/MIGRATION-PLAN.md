@@ -559,76 +559,51 @@ in `docs/MARGINS.md`.
 
 ---
 
-## Open questions — please answer before step 2
+## Question status
 
-**Q-1 (blocking). PAPPL 1.4.x is not available on this machine, and I cannot get
-it from Debian.** Facts I verified:
-- No `pappl/` headers under `/usr/include` or `/usr/local/include`.
-- `pkg-config` is **not installed** at all (no `/usr/bin/pkg-config`, no `pkgconf`).
-- `apt-cache madison libpappl-dev` → **`1.3.1-2.1+b2`** from `trixie/main`. That
-  is the only version Debian trixie offers; there is no 1.4.x anywhere in the
-  configured archives.
+All eleven questions raised in this document have been answered. The full
+decision log, with reasoning, is in [`docs/DECISIONS.md`](DECISIONS.md);
+excluded features are in [`docs/NON-GOALS.md`](NON-GOALS.md). This section is
+the index.
 
-Ground rule 2 forbids me from writing a single FFI declaration until I can read
-the real headers, so this blocks step 2 entirely. How do you want to proceed?
-(a) build PAPPL 1.4.x from source into a local prefix, (b) target the 1.3.1 that
-Debian actually ships — which also matters for the .deb, since the package must
-depend on a libpappl that exists in the archive, or (c) something else you have
-already set up. Related: do you want `pkg-config`/`pkgconf` and `libpappl-dev`
-installed here, and should I run the `apt` commands or will you?
+### Decided
 
-**Q-2. What does PAPPL actually hand us for the left hard margin?** This is
-risk R-1, the single most dangerous item in the migration. I will not guess a
-field. Do you have a captured PAPPL raster header for this driver, or should I
-plan to instrument a build and capture one on real hardware?
+| # | Question | Decision |
+|---|---|---|
+| Q-1 | Which PAPPL version to target | Debian trixie's **1.3.1**, dynamically linked, guard `>= 1.3, < 2.0`. No vendoring, no static linking, no building 1.4.x from source. |
+| Q-2 | Where the hard margin comes from | A **driver constant** derived from the PPD, cross-checked at page start. Never read from a raster header. **No zero fallback** — a zero or absent margin fails the job. |
+| Q-3 | Duplex | **Out of scope for 2.0**, but publish `sides-supported` explicitly as one-sided rather than omitting it. |
+| Q-4 | Toner save / density | **Deferred.** No invented PJL values. Replace the hardcoded `DENSITY=3` with a documented named constant. |
+| Q-5 | Clean break | Approved for what we **ship**, not for what we **delete**. 1.x code frozen in-tree until P11 is green; the PPD stays permanently as project data. Delete list needs separate approval. |
+| Q-6 | Keep `raster.rs`? | **Keep**, behind a non-default Cargo feature `golden-replay` — *not* `#[cfg(test)]`, which is invisible to integration tests in another crate. |
+| Q-7 | Static or dynamic linking | **Dynamic**, against the archive's `libpappl1t64`. Answered together with Q-1; never open. |
+| Q-8b | Missing PPD licence header | **Add a GPL-2 header.** More important now that the PPD is permanent project data. |
+| Q-9 | Golden-file fixtures | **Approved**, with JSON sidecars and a registration-mark corpus case. **Implemented** — see `src/golden.rs` and `goldens/`. |
+| Q-10 | Device transport | **USB first, socket second.** Do not defer socket past 2.0 without asking. |
+| Q-11 | Language for new code | **English** for code, comments, identifiers, commits, docs and packaging metadata. |
 
-**Q-3. Duplex: wire it up, or keep it dormant?** The mapping exists and is
-tested, but is unreachable because the PPD has no `*Duplex` block, and
-`main.rs:509` + `main.rs:968` document two unfinished pieces (the manual-duplex
-tray override needs last-page lookahead; two-pass page ordering is not
-implemented). A Printer Application UI will show a duplex control if the driver
-advertises one. Advertise it and finish both pieces, or leave it out of 2.0?
+### Still open
 
-**Q-4. Toner save / density.** `@PJL SET DENSITY=3` is hardcoded, and there is
-no economode option anywhere. Your task text lists "toner save" among the
-options to inventory, which suggests you expect one. Should 2.0 add
-density/toner-save controls, and if so — what are the real PJL values? I will
-not invent them (ground rule 1).
+**Q-8a — licence for the `pappl` safe wrapper.** Deliberately unassigned
+pending a decision. The audited SPDX state is in `docs/DECISIONS.md`: the
+project is unambiguously **`GPL-2.0-only`** (Cargo.toml, `src/spl.rs:8` and
+`packaging/debian/copyright` all agree; the `LICENSE` file's "any later
+version" wording is only the FSF boilerplate appendix). Because of that,
+Apache-2.0 for our own wrapper would be internally incompatible.
+**Recommendation: MIT.** A newly discovered wrinkle needs the same call:
+`pappl-sys` at plain Apache-2.0 has the identical problem, and the standard
+resolution is to dual-license it `Apache-2.0 OR MIT`.
 
-**Q-5. Is 2.0 a clean break, or does the .deb ship both?** The 1.x filter is
-frozen on `legacy/cups-filter-1.x`. Should the 2.0 package still install
-`rastertospl-rust` + the PPD for existing queues, or only the Printer
-Application? This decides whether `raster.rs` and the PPD stay in the shipping
-path or become test-only.
+### Deferred to a later step, not blocking
 
-**Q-6. Does `spl2-core` keep the CUPS Raster parser?** PAPPL delivers decoded
-lines through its raster callbacks, so `raster.rs` may become dead weight in
-production — but it is also the only thing that can replay 1.x golden inputs.
-Keep it as a test/replay path, keep it in the shipping path, or drop it?
-
-**Q-7. Static or dynamic linking for the .deb?** The 1.x package is a static
-musl binary with no libc dependency. Statically linking libpappl puts Apache-2.0
-code inside a GPL-2.0-only binary and makes the whole package rest on PAPPL's
-linking exception. I recommend dynamic linking against `libpappl1t64` with a
-normal `Depends:`. Confirm?
-
-**Q-8. `pappl` crate licence:** Apache-2.0 OR MIT (my proposal, maximises
-reuse), or plain Apache-2.0 to match `pappl-sys` and upstream? And do you want
-the missing licence header added to `ppd/samsung-ml2160.ppd`?
-
-**Q-9. Golden-file fixtures.** Can I commit a few real CUPS Raster inputs and
-their SPL2 outputs as test assets (§9, step 0)? They are a few hundred KB each
-compressed. Without them, ground rule 6's byte-for-byte criterion has nothing to
-check against. Related: `spl.rs:1698` already wants
-`target/test_output/test.raster` and silently skips when it is missing — do you
-have that file, and may it be committed?
-
-**Q-10. Device transport and discovery.** The PPD advertises USB and
-network/Wi-Fi models (ML-2160/2165/2165W/2168). Which transports should the
-Printer Application support — PAPPL's USB device scheme only, or socket/DNS-SD
-as well?
-
-**Q-11. Language for new code.** Existing comments and log messages are in
-Turkish; `packaging/` and `README.md` are in English. Which do you want for the
-new crates? I will follow the existing convention (Turkish comments) unless you
-say otherwise.
+- **The printable-area vs full-media experiment (from Q-2).** Whether PAPPL
+  delivers `cupsWidth`/`cupsHeight` and scanlines for the printable area or the
+  full media must be answered by experiment, not documentation, and written up
+  in `docs/MARGINS.md`. It needs a working minimal PAPPL app, so it belongs to
+  P5.
+- **Dithering-path exposure (from the Q-1 follow-up).** Whether declaring only
+  1-bit black raster makes PAPPL's dithering overflow unreachable for us is to
+  be settled as part of the P9 raster-type decision and recorded in
+  `docs/SECURITY-REVIEW.md`.
+- **Confirming the unpatched lines in 1.3.1's source**, before filing a Debian
+  bug citing upstream commits `4587888f50` and `44327aaac3`.
