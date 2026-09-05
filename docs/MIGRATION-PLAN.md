@@ -301,6 +301,20 @@ samsung-ml2160-rust/            # virtual workspace root
 - **Moves here:** the orchestration half of `src/main.rs` — the job/page loop from `process_cups_raster_to_spl` (rewritten against PAPPL's callbacks), `print_header_info` (rewritten as `papplLogJob` calls), and `quote_untrusted`.
 - **Deleted:** `CupsFilterArgs` and its parse, `main`'s argv/stdin/stdout plumbing, and all three `process::exit` calls.
 - **New:** the driver-capability table that replaces the PPD (media sizes, resolutions, input slots, media types — mechanically derivable from `ppd/samsung-ml2160.ppd`, which is why the existing PPD-vs-constants tests are worth porting), device discovery, and the `papplMainloop` entry.
+- **New, and required before the raster callbacks are considered done:** the
+  option-struct sanity check that R-6 calls for. `rstartjob`/`rstartpage`
+  receive `pappl_pr_options_t`, whose first member is a CUPS-owned struct that
+  no dependency in the package pins; the fields we read after it — `copies`,
+  `printer_resolution`, `media.size_width`/`size_length`, `media.size_name` —
+  must be validated on every job and an implausible value must **fail the job
+  with a specific error, never be clamped or defaulted**. See requirement
+  R-6/H in §9. This is also where the per-page geometry validation from the
+  1.x `validate_page_header` lands, so the two checks are one piece of work.
+- **New, and blocked:** the hard-margin table in the driver-capability data
+  cannot be finalised until the ML-2160 vs ML-2165 margin question is settled
+  by measurement — see `docs/MARGINS.md` and release gate G-1. PAPPL's
+  driver data can express per-model margins; the classic PPD could not, so if
+  the models differ this step is where that is expressed.
 
 ### Test strategy across the split
 The 101 existing tests move with their code. The PPD-reading tests
@@ -506,13 +520,29 @@ The reason this is a real exposure rather than a theoretical one is that
 3. **Run time.** No introspection is possible — neither PAPPL nor libcups
    exports its own `sizeof`, and libcups exports no runtime version accessor
    (`httpGetVersion` reports the HTTP protocol version, not the library's).
-   The backstop is therefore the geometry validation the driver already
-   performs on every page: a shifted layout turns `copies`,
-   `printer_resolution` and the media dimensions into implausible values, and
-   the D-01/D-02 checks refuse the job instead of printing from them. That
-   check must be written to treat a nonsensical options struct as a hard
-   error, never as something to clamp — see the "no silent fallbacks" rule
-   this project already follows for margins.
+   The backstop is therefore the geometry validation the driver performs on
+   every page: a shifted layout turns `copies`, `printer_resolution` and the
+   media dimensions into implausible values, and the D-01/D-02 checks refuse
+   the job instead of printing from them.
+
+   > **Requirement R-6/H — the backstop is a hard error, never a clamp.**
+   > When the raster callbacks first read `pappl_pr_options_t`, an
+   > implausible field must **fail the job** with a specific message naming
+   > the field and its value. It must not be clamped, defaulted, rounded into
+   > range, or "corrected" to the nearest sensible value.
+   >
+   > This is written down because it is exactly the kind of requirement that
+   > erodes: months from now someone hits a printer or a client that produces
+   > an odd but harmless value, the job fails, and the obvious fix is a clamp.
+   > A clamp would not merely weaken this check — it would **delete the only
+   > runtime signal** that the libcups ABI moved underneath us, because a
+   > shifted struct produces exactly the "odd value" that a clamp is designed
+   > to absorb. The job that gets refused is the evidence.
+   >
+   > If a legitimate value is being rejected, the fix is to widen the
+   > validated range deliberately, with the reason recorded — not to make
+   > the failure path forgiving. Same rule the margin table already follows:
+   > a page that looks fine until measured is worse than a refused job.
 
 *Status:* layers 1 and 2 are in place. Layer 3 lands with the raster
 callbacks, when the option fields are first read.
