@@ -1,41 +1,41 @@
-//! # Altın Dosya (Golden File) Koşum Takımı
+//! # Golden-file harness
 //!
-//! Bu modül, 1.x CUPS filtresinin ÜRETTİĞİ SPL2/QPDL baytlarını, kod PAPPL
-//! Printer Application'a taşınmadan ÖNCE dondurur. Taşıma sırasındaki kabul
-//! ölçütü bayt bayt aynılıktır (proje kuralı 6); o ölçütün karşılaştırılacak
-//! bir referansa ihtiyacı var ve o referans yalnızca ŞİMDİ, 1.x kodu hâlâ
-//! çalışırken yakalanabilir.
+//! This module freezes the SPL2/QPDL bytes the 1.x CUPS filter PRODUCES,
+//! before the code moves to a PAPPL Printer Application. The acceptance
+//! criterion for that migration is byte-for-byte identity (project rule 6);
+//! that criterion needs a reference to compare against, and the reference can
+//! only be captured NOW, while the 1.x code still runs.
 //!
-//! ## Ne saklanıyor
+//! ## What is stored
 //!
-//! Her vaka için iki dosya:
+//! Two files per case:
 //!
-//! * `goldens/<vaka>.spl`  — filtrenin ürettiği ham SPL2/QPDL akışı.
-//! * `goldens/<vaka>.json` — o akışı üreten KLASİK CUPS sayfa başlığının
-//!   alanları, artı filtrenin o başlıktan türettiği QPDL yerleşim değerleri.
+//! * `goldens/<case>.spl`  — the raw SPL2/QPDL stream the filter produced.
+//! * `goldens/<case>.json` — the fields of the CLASSIC CUPS page header that
+//!   produced that stream, plus the QPDL placement values the filter derived
+//!   from it.
 //!
-//! JSON yan dosyası (sidecar) taşımanın ikinci yarısı için var: PAPPL
-//! tarafındaki seçenek eşlemesi (medya boyutu, çözünürlük, tepsi, kağıt türü,
-//! kenar boşluğu) bu dosyalara karşı doğrulanacak. Klasik başlık PAPPL
-//! yolunda artık üretilmeyeceği için, bu değerler de yalnızca şimdi
-//! yakalanabilir.
+//! The JSON sidecar exists for the second half of the migration: the option
+//! mapping on the PAPPL side (media size, resolution, tray, media type,
+//! margin) will be validated against these files. The classic header is no
+//! longer produced on the PAPPL path, so these values, too, can only be
+//! captured now.
 //!
-//! ## Girdiler neden commit edilmiyor
+//! ## Why the inputs are not committed
 //!
-//! Raster girdileri (A4 @1200 DPI için ~16 MB) bu dosyadaki `build_raster`
-//! tarafından DETERMİNİSTİK olarak üretiliyor, bu yüzden depoya konmuyor.
-//! Üreticinin kendisi değişirse bu, JSON yan dosyasındaki başlık alanlarında
-//! görünür — yani sapma sessiz kalmaz, incelemede fark edilir.
+//! The raster inputs (~16 MB for A4 @1200 DPI) are produced DETERMINISTICALLY
+//! by `build_raster` in this file, so they are not stored in the repository.
+//! If the generator itself changes, that shows up in the header fields of the
+//! JSON sidecar — the drift is not silent, it is visible in review.
 //!
-//! ## Yenileme
+//! ## Refreshing
 //!
 //! ```text
 //! UPDATE_GOLDENS=1 cargo test golden
 //! ```
 //!
-//! Altın dosyalar YALNIZCA kasıtlı bir davranış değişikliğiyle birlikte
-//! yenilenmelidir; `.spl` dosyasındaki her diff, yazıcıya giden baytların
-//! değiştiği anlamına gelir.
+//! Goldens may ONLY be refreshed together with a deliberate behaviour change;
+//! every diff in a `.spl` file means the bytes going to the printer changed.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -49,29 +49,30 @@ use crate::{
     process_cups_raster_to_spl, sanitize_copies, CupsFilterArgs,
 };
 
-/// Altın dosyalara yazılan SABİT servis tarihi.
+/// The FIXED service date written into the goldens.
 ///
-/// `@PJL DEFAULT SERVICEDATE` satırı normalde bugünün tarihini taşır; sabit
-/// bir değer verilmezse altın dosyalar her gece yarısı kırılırdı ve
-/// karşılaştırmayı "SERVICEDATE satırını yok say" diye gevşetmek, o satırdaki
-/// GERÇEK sapmaları da gizlerdi. Bu yüzden tarih gevşetilmiyor, sabitleniyor
-/// (bkz. `process_cups_raster_to_spl` doc yorumu).
+/// The `@PJL DEFAULT SERVICEDATE` line normally carries today's date; without
+/// a fixed value the goldens would break every midnight, and loosening the
+/// comparison to "ignore the SERVICEDATE line" would also hide REAL drift on
+/// that line. So the date is not loosened, it is pinned (see the
+/// `process_cups_raster_to_spl` doc comment).
 const GOLDEN_SERVICE_DATE: &str = "20260101";
 
-/// Altın dosyaların iş adı/kullanıcı adı — PJL alanlarının da sabit kalması
-/// için argv'den değil buradan geliyor.
+/// Job title / user name for the goldens — they come from here rather than
+/// from argv so the PJL fields stay fixed too.
 const GOLDEN_TITLE: &str = "golden";
 const GOLDEN_USER: &str = "tester";
 
-/// PPD'den türetilmiş medya tanımı.
+/// A medium, as defined by the PPD.
 ///
 /// `dimension_pt` = `*PaperDimension`, `imageable_pt` = `*ImageableArea`
-/// (sol, alt, sağ, üst). Değerler `ppd/samsung-ml2160.ppd` içindeki
-/// karşılık gelen satırlardan birebir alındı; `test_golden_media_matches_ppd`
-/// bağı bir yorum olmaktan çıkarıp doğruluyor.
+/// (left, bottom, right, top). The values are copied verbatim from the
+/// corresponding lines of `ppd/samsung-ml2160.ppd`;
+/// `test_golden_media_matches_ppd` turns that link from a comment into a
+/// verified fact.
 #[derive(Debug, Clone, Copy)]
 struct Media {
-    /// PPD `*PageSize` anahtarı.
+    /// PPD `*PageSize` keyword.
     ppd_key: &'static str,
     /// `*PaperDimension <key>: "W H"`.
     dimension_pt: (u32, u32),
@@ -80,7 +81,7 @@ struct Media {
 }
 
 impl Media {
-    /// Basılabilir alanın genişliği/yüksekliği (pt).
+    /// Width/height of the imageable area, in points.
     fn imageable_size_pt(&self) -> (u32, u32) {
         (
             self.imageable_pt.2 - self.imageable_pt.0,
@@ -110,49 +111,51 @@ const ENV_C5: Media = Media {
     imageable_pt: (12, 12, 447, 637),
 };
 
-/// `cups-filters`'ın piksel sayısı yuvarlaması: `round(pt * dpi / 72)`.
+/// The pixel rounding `cups-filters` performs: `round(pt * dpi / 72)`.
 ///
-/// Bu kural tahmin değil, ÖLÇÜM: `test_validate_page_header_accepts_real_cupsfilter_heights`
-/// içindeki sekiz gerçek `cupsHeight` değerinin (A4 @300/600/1200, Letter
-/// @600, Legal @600/1200, A6 @600, Folio @1200) hepsi bu formülle birebir
-/// yeniden üretiliyor; `test_golden_geometry_matches_measured_cupsfilter_output`
-/// bunu doğruluyor. `ceil` ya da `floor` sekiz değerin en az birinde şaşıyor.
+/// This rule is not a guess, it is a MEASUREMENT: all eight real `cupsHeight`
+/// values in `test_validate_page_header_accepts_real_cupsfilter_heights` (A4
+/// @300/600/1200, Letter @600, Legal @600/1200, A6 @600, Folio @1200) are
+/// reproduced exactly by this formula, and
+/// `test_golden_geometry_matches_measured_cupsfilter_output` verifies it.
+/// `ceil` or `floor` misses at least one of the eight.
 fn px_from_pt(pt: u32, dpi: u32) -> u32 {
     ((pt as u64 * dpi as u64 * 2 + 72) / (72 * 2)) as u32
 }
 
-/// Sayfa içeriği.
+/// Page content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Content {
-    /// Tamamen boş sayfa.
+    /// A completely blank page.
     Blank,
-    /// Basılabilir alanın DÖRT KÖŞESİNE birer piksellik hizalama işareti.
+    /// A one-pixel registration mark in EACH OF THE FOUR CORNERS of the
+    /// imageable area.
     ///
-    /// Kenar boşluğu regresyonunun bayt düzeyinde yakalanmasını sağlayan
-    /// vaka budur (bkz. `docs/MIGRATION-PLAN.md` R-1). Bir köşe işareti,
-    /// bant tamponunda tam olarak tek bir bitin konumunu belirler; yatay
-    /// yerleşim bir bayt kayarsa sıkıştırılmış payload değişir ve altın
-    /// dosya karşılaştırması cetvele gerek kalmadan kırılır.
+    /// This is the case that makes a margin regression fail at byte level
+    /// (see `docs/MIGRATION-PLAN.md` R-1). A corner mark pins the position of
+    /// exactly one bit in the band buffer; if horizontal placement shifts by
+    /// one byte the compressed payload changes and the golden comparison
+    /// breaks without anyone reaching for a ruler.
     ///
-    /// DİKKAT: sol köşe işaretleri her zaman KAĞITA ULAŞMAZ. A4 @600 DPI'da
-    /// sert kenar boşluğu 13 bayt, ortalama 12 bayttır; net `src_skip = 1`,
-    /// yani CUPS satırının ilk baytı (dolayısıyla x=0 işareti) atılır. Bu bir
-    /// hata değil, SpliX'in davranışıdır — ve altın dosyanın kaydettiği şey
-    /// tam olarak budur. Yan dosyadaki `src_skip_bytes` alanı hangi vakada
-    /// ne kadar atıldığını söyler.
+    /// NOTE: the left-hand marks do NOT always reach paper. On A4 @600 DPI the
+    /// hard margin is 13 bytes and the centring offset is 12, so the net
+    /// `src_skip` is 1 — the first byte of the CUPS line (and with it the x=0
+    /// mark) is dropped. That is not a bug, it is SpliX's behaviour, and it is
+    /// exactly what the golden records. The `src_skip_bytes` field in the
+    /// sidecar says how much was dropped in which case.
     RegistrationMarks,
 }
 
-/// Girdi akışının CUPS Raster sürümü.
+/// The CUPS Raster version of the input stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Encoding {
-    /// `RaS3` — sıkıştırmasız.
+    /// `RaS3` — uncompressed.
     V3,
-    /// `RaS2` — satır-RLE (PWG Raster ile aynı gövde kodlaması).
+    /// `RaS2` — line RLE (the same body encoding PWG Raster uses).
     V2Rle,
 }
 
-/// Bir altın dosya vakası.
+/// One golden case.
 #[derive(Debug, Clone, Copy)]
 struct Case {
     name: &'static str,
@@ -160,9 +163,9 @@ struct Case {
     /// (x_dpi, y_dpi)
     resolution: (u32, u32),
     copies: u32,
-    /// CUPS `MediaPosition` (PPD `*InputSlot`); 0 = seçilmemiş.
+    /// CUPS `MediaPosition` (PPD `*InputSlot`); 0 = not selected.
     media_position: u32,
-    /// CUPS `MediaType` (PPD `*MediaType`); boş = seçilmemiş.
+    /// CUPS `MediaType` (PPD `*MediaType`); empty = not selected.
     media_type: &'static str,
     pages: u32,
     content: Content,
@@ -184,7 +187,7 @@ impl Case {
         }
     }
 
-    /// CUPS satırının piksel genişliği — basılabilir alandan türetilir.
+    /// Pixel width of the CUPS line — derived from the imageable area.
     fn width_px(&self) -> u32 {
         px_from_pt(self.media.imageable_size_pt().0, self.resolution.0)
     }
@@ -198,59 +201,60 @@ impl Case {
     }
 }
 
-/// Altın dosya korpusu.
+/// The golden corpus.
 ///
-/// Kapsam gerekçesi:
+/// Coverage rationale:
 ///
-/// * `*-marks` vakaları A4 ve Letter için DESTEKLENEN HER ÇÖZÜNÜRLÜKTE var
-///   (300x300, 600x600, 1200x600, 1200x1200) — kenar boşluğu ve bant
-///   yüksekliği kurallarının hepsini birden gerdiriyor. 1200x600 asimetrik
-///   modu, çözünürlük eksenlerinin karışmasını (R-4) yakalayan tek vakadır.
-/// * `a4-300-marks` ayrıca 64 satırlık bant kuralını (R-3) kapsar; diğer
-///   bütün vakalar 128 satırlık bant üretir.
-/// * `a5` ve `envc5` küçük medya ve zarf geometrisini kapsar.
-/// * `*-3copies` kopya alanının iki yere birden (sayfa başlığı + sayfa sonu)
-///   yazılmasını dondurur (R-5).
-/// * `*-manual-env` tepsi ve kağıt türü eşlemesini dondurur.
-/// * `*-v2rle` aynı sayfayı satır-RLE'li bir girdiden üretir; `*-600-marks`
-///   ile BAYT BAYT aynı çıkmalıdır (`test_golden_v2_and_v3_agree`).
-/// * `a4-600-blank` sıkıştırıcının tamamen boş bant davranışını dondurur.
+/// * The `*-marks` cases exist for A4 and Letter at EVERY SUPPORTED
+///   RESOLUTION (300x300, 600x600, 1200x600, 1200x1200), which stretches both
+///   the margin and the band-height rules. The asymmetric 1200x600 mode is
+///   the only case that catches the resolution axes being swapped (R-4).
+/// * `a4-300-marks` additionally covers the 64-line band rule (R-3); every
+///   other case produces 128-line bands.
+/// * `a5` and `envc5` cover small media and envelope geometry.
+/// * `*-3copies` freezes the copy count being written in two places at once
+///   (page header + end of page) (R-5).
+/// * `*-manual-env` freezes the tray and media-type mapping.
+/// * `*-v2rle` produces the same page from a line-RLE input; it must come out
+///   BYTE-FOR-BYTE identical to `*-600-marks` (`test_golden_v2_and_v3_agree`).
+/// * `a4-600-blank` freezes the compressor's behaviour on a completely empty
+///   band.
 const CASES: &[Case] = &[
-    // --- A4, her çözünürlük ---
+    // --- A4, every resolution ---
     Case::new("a4-300-marks", A4, (300, 300)),
     Case::new("a4-600-marks", A4, (600, 600)),
     Case::new("a4-1200x600-marks", A4, (1200, 600)),
     Case::new("a4-1200-marks", A4, (1200, 1200)),
-    // --- Letter, her çözünürlük ---
+    // --- Letter, every resolution ---
     Case::new("letter-300-marks", LETTER, (300, 300)),
     Case::new("letter-600-marks", LETTER, (600, 600)),
     Case::new("letter-1200x600-marks", LETTER, (1200, 600)),
     Case::new("letter-1200-marks", LETTER, (1200, 1200)),
-    // --- diğer medya ---
+    // --- other media ---
     Case::new("a5-600-marks", A5, (600, 600)),
     Case::new("envc5-600-marks", ENV_C5, (600, 600)),
-    // --- boş sayfa ---
+    // --- blank page ---
     Case {
         content: Content::Blank,
         ..Case::new("a4-600-blank", A4, (600, 600))
     },
-    // --- kopyalar ---
+    // --- copies ---
     Case {
         copies: 3,
         ..Case::new("a4-600-marks-3copies", A4, (600, 600))
     },
-    // --- tepsi + kağıt türü ---
+    // --- tray + media type ---
     Case {
         media_position: 2,
         media_type: "ENV",
         ..Case::new("envc5-600-marks-manual-env", ENV_C5, (600, 600))
     },
-    // --- çok sayfa ---
+    // --- multiple pages ---
     Case {
         pages: 3,
         ..Case::new("a4-600-marks-3pages", A4, (600, 600))
     },
-    // --- v2 satır-RLE girdisi ---
+    // --- v2 line-RLE input ---
     Case {
         encoding: Encoding::V2Rle,
         ..Case::new("a4-600-marks-v2rle", A4, (600, 600))
@@ -258,10 +262,10 @@ const CASES: &[Case] = &[
 ];
 
 // ============================================================================
-// Raster girdisi üreteci
+// Raster input generator
 // ============================================================================
 
-/// Tek bir raster satırı üretir.
+/// Produces a single raster line.
 fn build_line(case: &Case, y: u32) -> Vec<u8> {
     let bpl = case.bytes_per_line() as usize;
     let mut line = vec![0u8; bpl];
@@ -269,9 +273,9 @@ fn build_line(case: &Case, y: u32) -> Vec<u8> {
     if case.content == Content::RegistrationMarks {
         let last_y = case.height_lines() - 1;
         if y == 0 || y == last_y {
-            // Sol köşe: x = 0 -> 0. baytın en anlamlı biti.
+            // Left corner: x = 0 -> most significant bit of byte 0.
             line[0] |= 0x80;
-            // Sağ köşe: x = width - 1.
+            // Right corner: x = width - 1.
             let last_x = case.width_px() - 1;
             let byte = (last_x / 8) as usize;
             let bit = 7 - (last_x % 8);
@@ -282,7 +286,7 @@ fn build_line(case: &Case, y: u32) -> Vec<u8> {
     line
 }
 
-/// 1796 baytlık `cups_page_header2_t` (Big Endian) üretir.
+/// Produces the 1796-byte `cups_page_header2_t` (big endian).
 fn build_page_header(case: &Case) -> Vec<u8> {
     let mut buf = vec![0u8; 1796];
     let mut put = |off: usize, val: u32| {
@@ -297,7 +301,7 @@ fn build_page_header(case: &Case) -> Vec<u8> {
     put(288, img_b);
     put(292, img_r);
     put(296, img_t);
-    put(312, img_l); // Margins[0] — *ImageableArea sol kenarı
+    put(312, img_l); // Margins[0] — left edge of *ImageableArea
     put(316, img_b); // Margins[1]
     put(324, case.media_position);
     put(340, case.copies);
@@ -319,14 +323,14 @@ fn build_page_header(case: &Case) -> Vec<u8> {
     buf
 }
 
-/// Bir satırı CUPS Raster v2 satır-RLE'siyle kodlar.
+/// Encodes one line with CUPS Raster v2 line RLE.
 ///
-/// Kodlama `raster.rs` `CupsLineDecoder`'ın çözdüğü biçimdir: satır başına bir
-/// `repeat` baytı (burada hep 0 = satır bir kez), ardından satır dolana kadar
-/// tekrar kayıtları. 1-bit veride piksel başına bayt 1'dir, bu yüzden eşit
-/// baytları en çok 128'lik gruplara bölmek yeterli.
+/// The encoding is the one `CupsLineDecoder` in `raster.rs` decodes: one
+/// `repeat` byte per line (always 0 here, so the line appears once), then
+/// repeat records until the line is full. With 1-bit data the bytes-per-pixel
+/// count is 1, so splitting equal bytes into groups of at most 128 is enough.
 fn encode_v2_line(line: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8]; // repeat = 0 -> satır bir kez
+    let mut out = vec![0u8]; // repeat = 0 -> line appears once
     let mut i = 0usize;
     while i < line.len() {
         let byte = line[i];
@@ -334,14 +338,14 @@ fn encode_v2_line(line: &[u8]) -> Vec<u8> {
         while i + run < line.len() && line[i + run] == byte && run < 128 {
             run += 1;
         }
-        out.push((run - 1) as u8); // n < 128 -> sonraki piksel (n+1) kez
+        out.push((run - 1) as u8); // n < 128 -> next pixel repeated (n+1) times
         out.push(byte);
         i += run;
     }
     out
 }
 
-/// Vakanın tam CUPS Raster akışını üretir.
+/// Produces the case's complete CUPS Raster stream.
 fn build_raster(case: &Case) -> Vec<u8> {
     let mut stream = match case.encoding {
         Encoding::V3 => b"RaS3".to_vec(),
@@ -366,7 +370,7 @@ fn build_raster(case: &Case) -> Vec<u8> {
 }
 
 // ============================================================================
-// Yan dosya (sidecar) üretimi
+// Sidecar generation
 // ============================================================================
 
 fn json_escape(s: &str) -> String {
@@ -387,17 +391,18 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Vakanın klasik CUPS sayfa başlığını ve filtrenin ondan türettiği QPDL
-/// yerleşim değerlerini JSON olarak yazar.
+/// Writes the case's classic CUPS page header, and the QPDL placement values
+/// the filter derives from it, as JSON.
 ///
-/// PAPPL tarafındaki seçenek eşlemesi bu dosyaya karşı doğrulanacak: klasik
-/// başlık orada artık üretilmeyeceği için, referans yalnızca burada saklanır.
+/// The option mapping on the PAPPL side will be validated against this file:
+/// the classic header is no longer produced there, so this is the only place
+/// the reference is kept.
 fn build_sidecar(case: &Case) -> String {
     let header_bytes = build_page_header(case);
     let header = PageHeader::parse(&header_bytes, CupsRasterVersion::V3Be)
-        .expect("üretilen başlık ayrıştırılamadı");
+        .expect("the generated header should parse");
 
-    // Filtrenin türettiği yerleşim değerleri.
+    // The placement values the filter derives.
     let page_width_px =
         compute_page_width_pixels(header.page_size_points[0], header.hw_resolution[0]);
     let band_width_bytes = page_width_px.div_ceil(8);
@@ -407,15 +412,15 @@ fn build_sidecar(case: &Case) -> String {
         header.bytes_per_line as usize,
         hard_margin,
     )
-    .expect("altın vaka geçerli bir yerleşim üretmeli");
+    .expect("a golden case must produce a valid placement");
     let band_height = band_height_for(&header);
     let paper_size = SplPaperSize::from_dimensions_pt_exact(
         header.page_size_points[0],
         header.page_size_points[1],
     )
-    .expect("altın vaka tanınan bir kâğıt ölçüsü kullanmalı");
+    .expect("a golden case must use a recognised paper size");
     let paper_source = SplPaperSource::from_media_position(header.media_position)
-        .expect("altın vaka tanınan bir tepsi kullanmalı");
+        .expect("a golden case must use a recognised tray");
 
     let (img_l, img_b, img_r, img_t) = case.media.imageable_pt;
 
@@ -514,14 +519,14 @@ fn build_sidecar(case: &Case) -> String {
 }
 
 // ============================================================================
-// Çalıştırma ve karşılaştırma
+// Running and comparing
 // ============================================================================
 
 fn goldens_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/goldens"))
 }
 
-/// Vakayı filtreden geçirip üretilen SPL akışını döner.
+/// Runs the case through the filter and returns the SPL stream it produced.
 fn run_case(case: &Case) -> Vec<u8> {
     let args = CupsFilterArgs {
         job_id: Some("1".to_string()),
@@ -542,7 +547,7 @@ fn run_case(case: &Case) -> Vec<u8> {
         &mut out,
         GOLDEN_SERVICE_DATE,
     )
-    .unwrap_or_else(|e| panic!("altın vaka '{}' işlenemedi: {}", case.name, e));
+    .unwrap_or_else(|e| panic!("golden case '{}' failed to process: {}", case.name, e));
     out
 }
 
@@ -550,22 +555,22 @@ fn update_requested() -> bool {
     std::env::var_os("UPDATE_GOLDENS").is_some()
 }
 
-/// `DUMP_GOLDEN_RASTER=<dizin>` ayarlıysa, vakanın ÜRETİLEN raster girdisini
-/// o dizine yazar.
+/// If `DUMP_GOLDEN_RASTER=<dir>` is set, writes the case's GENERATED raster
+/// input into that directory.
 ///
-/// İki işe yarıyor: (1) altın dosyalar depoda dururken girdiler durmuyor, bu
-/// yüzden bir sapmayı elle incelemek gerektiğinde girdiyi yeniden elde etmenin
-/// yolu bu; (2) bu koşum takımı filtreyi SÜREÇ İÇİNDE çağırıyor, oysa CUPS
-/// kurulmuş ikiliyi çalıştırır — dökülen girdi, ikisinin aynı baytları
-/// ürettiğini doğrulamayı mümkün kılar:
+/// It serves two purposes: (1) the goldens are committed but the inputs are
+/// not, so this is how an input is recovered when drift has to be inspected by
+/// hand; (2) this harness calls the filter IN PROCESS, whereas CUPS runs the
+/// installed binary — the dumped input makes it possible to verify that the
+/// two produce the same bytes:
 ///
 /// ```text
 /// DUMP_GOLDEN_RASTER=/tmp/r cargo test golden
 /// ./target/release/rastertospl-rust 1 tester golden 1 '' /tmp/r/a4-600-marks.raster > /tmp/out.spl
 /// ```
 ///
-/// (İkilinin çıktısı yalnızca `SERVICEDATE` satırında ayrılır; o satır altın
-/// dosyalarda sabitlenmiştir, ikilide ise bugünün tarihidir.)
+/// (The binary's output differs only on the `SERVICEDATE` line; that line is
+/// pinned in the goldens and taken from the clock in the binary.)
 fn dump_raster_if_requested(case: &Case, raster: &[u8]) {
     let Some(dir) = std::env::var_os("DUMP_GOLDEN_RASTER") else {
         return;
@@ -577,19 +582,19 @@ fn dump_raster_if_requested(case: &Case, raster: &[u8]) {
     let _ = fs::write(dir.join(format!("{}.raster", case.name)), raster);
 }
 
-/// Üretilen içeriği altın dosyayla karşılaştırır; `UPDATE_GOLDENS` ayarlıysa
-/// dosyayı yeniler.
+/// Compares the produced content against the golden; refreshes the file if
+/// `UPDATE_GOLDENS` is set.
 fn compare_or_update(path: PathBuf, produced: &[u8], case_name: &str) {
     if update_requested() {
-        fs::create_dir_all(goldens_dir()).expect("goldens/ oluşturulamadı");
+        fs::create_dir_all(goldens_dir()).expect("could not create goldens/");
         fs::write(&path, produced)
-            .unwrap_or_else(|e| panic!("{} yazılamadı: {}", path.display(), e));
+            .unwrap_or_else(|e| panic!("could not write {}: {}", path.display(), e));
         return;
     }
 
     let expected = fs::read(&path).unwrap_or_else(|e| {
         panic!(
-            "Altın dosya okunamadı: {} ({}). İlk üretim için: UPDATE_GOLDENS=1 cargo test golden",
+            "could not read golden file: {} ({}). To produce it the first time: UPDATE_GOLDENS=1 cargo test golden",
             path.display(),
             e
         )
@@ -599,9 +604,9 @@ fn compare_or_update(path: PathBuf, produced: &[u8], case_name: &str) {
         return;
     }
 
-    // Farkın NEREDE başladığını söyle: 28 KB'lık iki akışı gözle karşılaştırmak
-    // mümkün değil, ama ilk farklı bayt genelde hangi aşamanın (PJL başlığı,
-    // sayfa başlığı, bant kaydı) değiştiğini doğrudan gösterir.
+    // Say WHERE the difference starts: comparing two 28 KB streams by eye is
+    // not possible, but the first differing byte usually points straight at
+    // the stage (PJL header, page header, band record) that changed.
     let first_diff = expected
         .iter()
         .zip(produced.iter())
@@ -619,17 +624,17 @@ fn compare_or_update(path: PathBuf, produced: &[u8], case_name: &str) {
     };
 
     panic!(
-        "ALTIN DOSYA SAPMASI — vaka '{}'\n\
-         dosya      : {}\n\
-         beklenen   : {} bayt\n\
-         üretilen   : {} bayt\n\
-         ilk fark   : ofset {}\n\
-         beklenen   : {}\n\
-         üretilen   : {}\n\
+        "GOLDEN FILE DRIFT — case '{}'\n\
+         file       : {}\n\
+         expected   : {} bytes\n\
+         produced   : {} bytes\n\
+         first diff : offset {}\n\
+         expected   : {}\n\
+         produced   : {}\n\
          \n\
-         Yazıcıya giden baytlar değişti. Bu KASITLI bir davranış değişikliğiyse\n\
-         `UPDATE_GOLDENS=1 cargo test golden` ile yenileyin ve diff'i incelemeye\n\
-         dahil edin; değilse bir regresyondur.",
+         The bytes going to the printer changed. If this is a DELIBERATE\n\
+         behaviour change, refresh with `UPDATE_GOLDENS=1 cargo test golden`\n\
+         and include the diff in review; otherwise it is a regression.",
         case_name,
         path.display(),
         expected.len(),
@@ -641,11 +646,11 @@ fn compare_or_update(path: PathBuf, produced: &[u8], case_name: &str) {
 }
 
 // ============================================================================
-// Testler
+// Tests
 // ============================================================================
 
-/// Korpustaki her vaka için üretilen SPL akışı ve yan dosya, commit edilmiş
-/// altın dosyalarla BAYT BAYT aynı olmalıdır.
+/// For every case in the corpus, the produced SPL stream and sidecar must be
+/// BYTE-FOR-BYTE identical to the committed goldens.
 #[test]
 fn test_goldens_match() {
     let dir = goldens_dir();
@@ -662,39 +667,39 @@ fn test_goldens_match() {
     }
 }
 
-/// Aynı sayfa, satır-RLE'li (`RaS2`) ve sıkıştırmasız (`RaS3`) girdiden
-/// üretildiğinde BAYT BAYT aynı SPL akışını vermelidir.
+/// The same page, produced from a line-RLE (`RaS2`) and from an uncompressed
+/// (`RaS3`) input, must give BYTE-FOR-BYTE identical SPL streams.
 ///
-/// Bu, PAPPL'e geçişte özellikle önemli: PWG Raster'ın gövde kodlaması
-/// `RaS2` ile aynıdır, yani bu eşitlik bozulursa çözücü tarafında bir sapma
-/// var demektir.
+/// This matters specifically for the PAPPL migration: PWG Raster's body
+/// encoding is the same as `RaS2`, so if this equality breaks there is drift
+/// on the decoder side.
 #[test]
 fn test_golden_v2_and_v3_agree() {
     let v3 = CASES
         .iter()
         .find(|c| c.name == "a4-600-marks")
-        .expect("a4-600-marks vakası korpusta olmalı");
+        .expect("the a4-600-marks case must be in the corpus");
     let v2 = CASES
         .iter()
         .find(|c| c.name == "a4-600-marks-v2rle")
-        .expect("a4-600-marks-v2rle vakası korpusta olmalı");
+        .expect("the a4-600-marks-v2rle case must be in the corpus");
 
     assert_eq!(
         run_case(v3),
         run_case(v2),
-        "RaS2 ve RaS3 girdileri aynı SPL akışını üretmeli"
+        "RaS2 and RaS3 inputs must produce the same SPL stream"
     );
 }
 
-/// `px_from_pt` gerçek `cups-filters` çıktısını yeniden üretmelidir.
+/// `px_from_pt` must reproduce real `cups-filters` output.
 ///
-/// Ölçümler `test_validate_page_header_accepts_real_cupsfilter_heights`
-/// içindeki tablodan alındı; oradaki `cupsHeight` değerleri gerçek
-/// çalıştırmalardan geliyor. Yuvarlama kuralı (`round`, `ceil`/`floor` değil)
-/// altın korpusun geometrisinin gerçekçi olmasını sağlar.
+/// The measurements come from the table in
+/// `test_validate_page_header_accepts_real_cupsfilter_heights`; those
+/// `cupsHeight` values come from real runs. The rounding rule (`round`, not
+/// `ceil`/`floor`) is what keeps the corpus geometry realistic.
 #[test]
 fn test_golden_geometry_matches_measured_cupsfilter_output() {
-    // (basılabilir yükseklik pt, y_dpi, ölçülen cupsHeight)
+    // (imageable height pt, y_dpi, measured cupsHeight)
     let measured = [
         (818u32, 300u32, 3408u32), // A4   (830 - 12)
         (818, 600, 6817),          // A4
@@ -716,36 +721,36 @@ fn test_golden_geometry_matches_measured_cupsfilter_output() {
     }
 }
 
-/// Korpustaki medya tanımları PPD'nin kendisiyle uyuşmalıdır.
+/// The corpus's media definitions must agree with the PPD itself.
 ///
-/// Altın dosyaların geometrisi PPD'den türetiliyor; PPD değişip bu tablo
-/// değişmezse altın dosyalar sessizce gerçek dışı bir geometriyi dondurmaya
-/// devam ederdi.
+/// The goldens' geometry is derived from the PPD; if the PPD changed and this
+/// table did not, the goldens would silently keep freezing an unrealistic
+/// geometry.
 #[test]
 fn test_golden_media_matches_ppd() {
     let ppd = fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/ppd/samsung-ml2160.ppd"
     ))
-    .expect("PPD okunamadı");
+    .expect("could not read the PPD");
 
     for media in [A4, LETTER, A5, ENV_C5] {
         let dim_line = format!("*PaperDimension {}/", media.ppd_key);
         let dim = ppd
             .lines()
             .find(|l| l.starts_with(&dim_line))
-            .unwrap_or_else(|| panic!("PPD'de *PaperDimension {} yok", media.ppd_key));
+            .unwrap_or_else(|| panic!("no *PaperDimension {} in the PPD", media.ppd_key));
         let dim_values: Vec<u32> = dim
             .split('"')
             .nth(1)
-            .expect("*PaperDimension değeri tırnak içinde olmalı")
+            .expect("*PaperDimension value must be quoted")
             .split_whitespace()
-            .map(|v| v.parse().expect("*PaperDimension sayısal olmalı"))
+            .map(|v| v.parse().expect("*PaperDimension must be numeric"))
             .collect();
         assert_eq!(
             dim_values,
             vec![media.dimension_pt.0, media.dimension_pt.1],
-            "{} *PaperDimension uyuşmuyor",
+            "{} *PaperDimension does not match",
             media.ppd_key
         );
 
@@ -753,29 +758,29 @@ fn test_golden_media_matches_ppd() {
         let area = ppd
             .lines()
             .find(|l| l.starts_with(&area_line))
-            .unwrap_or_else(|| panic!("PPD'de *ImageableArea {} yok", media.ppd_key));
+            .unwrap_or_else(|| panic!("no *ImageableArea {} in the PPD", media.ppd_key));
         let area_values: Vec<u32> = area
             .split('"')
             .nth(1)
-            .expect("*ImageableArea değeri tırnak içinde olmalı")
+            .expect("*ImageableArea value must be quoted")
             .split_whitespace()
-            .map(|v| v.parse().expect("*ImageableArea sayısal olmalı"))
+            .map(|v| v.parse().expect("*ImageableArea must be numeric"))
             .collect();
         let (l, b, r, t) = media.imageable_pt;
         assert_eq!(
             area_values,
             vec![l, b, r, t],
-            "{} *ImageableArea uyuşmuyor",
+            "{} *ImageableArea does not match",
             media.ppd_key
         );
     }
 }
 
-/// Korpus, kullanıcının istediği kapsamı gerçekten sağlamalı: A4 ve Letter
-/// için DESTEKLENEN HER ÇÖZÜNÜRLÜKTE bir hizalama işareti vakası.
+/// The corpus must actually provide the coverage that was asked for: a
+/// registration-mark case for A4 and Letter at EVERY SUPPORTED RESOLUTION.
 ///
-/// Bu test korpusun kendisini denetler; bir vaka yanlışlıkla silinirse ya da
-/// PPD'ye yeni bir çözünürlük eklenirse kırılır.
+/// This test audits the corpus itself; it breaks if a case is deleted by
+/// accident or a new resolution is added to the PPD.
 #[test]
 fn test_golden_corpus_covers_marks_on_a4_and_letter_at_every_resolution() {
     let resolutions = [(300, 300), (600, 600), (1200, 600), (1200, 1200)];
@@ -789,38 +794,38 @@ fn test_golden_corpus_covers_marks_on_a4_and_letter_at_every_resolution() {
             });
             assert!(
                 found,
-                "korpusta {} @ {}x{} için hizalama işareti vakası yok",
+                "no registration-mark case for {} @ {}x{} in the corpus",
                 media.ppd_key, res.0, res.1
             );
         }
     }
 }
 
-/// Sabit servis tarihi gerçekten etkili olmalı: altın akış, bugünün tarihini
-/// DEĞİL `GOLDEN_SERVICE_DATE`'i taşımalıdır.
+/// The pinned service date must actually take effect: the golden stream must
+/// carry `GOLDEN_SERVICE_DATE`, NOT today's date.
 ///
-/// Aksi hâlde altın dosyalar gece yarısı kırılır ve karşılaştırmayı
-/// gevşetme baskısı doğar — ki bu, gerçek sapmaları da gizlerdi.
+/// Otherwise the goldens would break at midnight, creating pressure to loosen
+/// the comparison — which would hide real drift as well.
 #[test]
 fn test_golden_service_date_is_pinned() {
     let case = CASES
         .iter()
         .find(|c| c.name == "a4-600-blank")
-        .expect("a4-600-blank vakası korpusta olmalı");
+        .expect("the a4-600-blank case must be in the corpus");
     let out = run_case(case);
 
     let expected = format!("@PJL DEFAULT SERVICEDATE={}\n", GOLDEN_SERVICE_DATE);
     assert!(
         out.windows(expected.len())
             .any(|w| w == expected.as_bytes()),
-        "altın akış sabit servis tarihini taşımalı"
+        "the golden stream must carry the pinned service date"
     );
 
     let today = format!("@PJL DEFAULT SERVICEDATE={}\n", current_service_date());
     if today != expected {
         assert!(
             !out.windows(today.len()).any(|w| w == today.as_bytes()),
-            "altın akış bugünün tarihini taşımamalı"
+            "the golden stream must not carry today's date"
         );
     }
 }

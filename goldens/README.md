@@ -1,53 +1,59 @@
-# Altın Dosyalar (Golden Files)
+# Golden Files
 
-Bu dizin, **1.x CUPS filtresinin ürettiği SPL2/QPDL baytlarını** PAPPL
-Printer Application'a geçişten önce dondurur. Kabul ölçütü bayt bayt
-aynılıktır (proje kuralı 6) ve bu ölçütün karşılaştırılacak bir referansa
-ihtiyacı var.
+This directory freezes **the SPL2/QPDL bytes the 1.x CUPS filter produces**
+before the move to a PAPPL Printer Application. The acceptance criterion is
+byte-for-byte identity (project rule 6), and that criterion needs a reference
+to compare against.
 
-Üreten ve karşılaştıran kod: [`../src/golden.rs`](../src/golden.rs).
+The code that produces and compares them: [`../src/golden.rs`](../src/golden.rs).
 
-## Dosyalar
+## Files
 
-| Dosya | İçerik |
+| File | Content |
 |---|---|
-| `<vaka>.spl` | Filtrenin ürettiği ham SPL2/QPDL akışı |
-| `<vaka>.json` | O akışı üreten klasik CUPS sayfa başlığı + filtrenin ondan türettiği QPDL yerleşim değerleri |
+| `<case>.spl` | The raw SPL2/QPDL stream the filter produced |
+| `<case>.json` | The classic CUPS page header that produced that stream, plus the QPDL placement values the filter derived from it |
+| `SHA256SUMS` | Checksums of every file above, so a validated corpus has a fixed reference |
 
-Raster **girdileri** depoda tutulmaz; `src/golden.rs` içindeki `build_raster`
-onları deterministik olarak üretir (A4 @1200 DPI girdisi tek başına ~16 MB).
+The raster **inputs** are not kept in the repository; `build_raster` in
+`src/golden.rs` generates them deterministically (the A4 @1200 DPI input alone
+is ~16 MB).
 
-## Kullanım
+## Usage
 
 ```sh
-# Karşılaştır (varsayılan; her `cargo test` çalıştırmasında)
+# Compare (the default; on every `cargo test` run)
 cargo test golden
 
-# Kasıtlı bir davranış değişikliğinden SONRA yenile
+# Refresh AFTER a deliberate behaviour change
 UPDATE_GOLDENS=1 cargo test golden
 
-# Girdileri dışa aktar (elle inceleme / kurulu ikiliyle karşılaştırma için)
+# Verify the committed bytes
+sha256sum -c SHA256SUMS
+
+# Export the inputs (for manual inspection / comparison with the installed binary)
 DUMP_GOLDEN_RASTER=/tmp/r cargo test golden
 ```
 
-`.spl` dosyasındaki her diff, **yazıcıya giden baytların değiştiği** anlamına
-gelir. Yenileme yalnızca kasıtlı bir değişiklikle birlikte ve diff incelemeye
-dahil edilerek yapılmalıdır.
+Every diff in a `.spl` file means **the bytes going to the printer changed**.
+Refresh only together with a deliberate change, and include the diff in review.
 
-## Korpus kapsamı
+## Corpus coverage
 
-* Hizalama işareti (`*-marks`) vakaları A4 ve Letter için **desteklenen her
-  çözünürlükte** (300x300, 600x600, 1200x600, 1200x1200).
-* `a4-300-marks` / `letter-300-marks` 64 satırlık bant kuralını kapsar;
-  diğerleri 128 satırlık bant üretir.
-* `a5-600-marks`, `envc5-600-marks` küçük medya ve zarf geometrisi.
-* `a4-600-marks-3copies` kopya alanı, `a4-600-marks-3pages` çok sayfa,
-  `envc5-600-marks-manual-env` tepsi + kağıt türü eşlemesi.
-* `a4-600-marks-v2rle` satır-RLE'li (`RaS2`) girdi; `a4-600-marks` ile bayt
-  bayt aynı olmalıdır.
-* `a4-600-blank` tamamen boş sayfa.
+* Registration-mark (`*-marks`) cases for A4 and Letter at **every supported
+  resolution** (300x300, 600x600, 1200x600, 1200x1200).
+* `a4-300-marks` / `letter-300-marks` cover the 64-line band rule; everything
+  else produces 128-line bands.
+* `a5-600-marks`, `envc5-600-marks` cover small media and envelope geometry.
+* `a4-600-marks-3copies` covers the copy field, `a4-600-marks-3pages` covers
+  multiple pages, `envc5-600-marks-manual-env` covers the tray + media-type
+  mapping.
+* `a4-600-marks-v2rle` uses a line-RLE (`RaS2`) input; it must come out
+  byte-for-byte identical to `a4-600-marks`.
+* `a4-600-blank` is a completely blank page.
 
-**Bilinen boşluk:** bu PPD'nin her medyada 12 pt kenar boşluğu olduğu için
-`band_placement`'ın `dst_offset > 0` dalı korpusta hiç tetiklenmiyor
-(`dst_offset` her vakada 0). Sert kenar boşluğu ortalamadan küçük olan bir
-geometri eklenmedikçe o dal altın dosyalarla korunmuyor.
+**Known gap:** because every medium in this PPD has a 12 pt margin, the
+`dst_offset > 0` branch of `band_placement` is never exercised by the corpus
+(`dst_offset` is 0 in every case). Until a geometry whose hard margin is
+smaller than the centring offset is added, that branch is not protected by any
+golden file.
