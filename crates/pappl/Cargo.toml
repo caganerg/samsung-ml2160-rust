@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "pappl"
+version = "0.1.0"
+edition = "2021"
+description = "Safe wrapper over pappl-sys: RAII handles and the catch_unwind callback boundary"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[dependencies]
+pappl-sys = { path = "../pappl-sys" }

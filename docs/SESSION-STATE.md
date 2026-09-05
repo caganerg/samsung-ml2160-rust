@@ -61,10 +61,20 @@ The prompt series splits P3 into the bindings (its P3) and their layout tests
 before the first declaration. Where older documents in this repository say
 P11 or P12, they mean the rows above.
 
-**What to do next.** Continue P3 into P4: the `pappl` safe wrapper, whose
-entire reason for existing is to own the `unsafe` surface and the
-`catch_unwind` shim every callback must pass through (rule 5). Two things are
-deliberately left for when they are needed: the fields of
+**P4 has started.** `crates/pappl` holds the safe wrapper: `guard`, the
+`catch_unwind` shim every `extern "C"` callback body passes through; borrowed
+`Device` and `Job` handles with lifetimes and no `Drop`, because PAPPL owns
+those objects and closes them when the callback returns; a `LogLevel` enum; and
+an `io::Write` implementation for `Device`, which is the join that lets the
+unchanged SPL2 encoder write to a PAPPL device without knowing PAPPL exists.
+`tests/boundary.rs` calls a panicking callback through a real
+`pappl_pr_rstartjob_cb_t` function pointer and asserts it returns `false`
+rather than unwinding.
+
+**What to do next.** Finish P4 and move to P5: the driver-capability table,
+the mainloop, and the printable-area experiment. Owning wrappers with `Drop`
+belong to that step, when this crate starts creating PAPPL objects rather than
+borrowing them. Two things are deliberately left for when they are needed: the fields of
 `cups_page_header2_t` (bound as opaque storage today) and `cups_option_t`
 (opaque pointer) — both are CUPS headers and get the same transcription plus
 probe treatment. Also outstanding: SPDX headers and `license` fields for the

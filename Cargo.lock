@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "pappl"
+version = "0.1.0"
+dependencies = [
+ "pappl-sys",
+]
+
+[[package]]
 name = "pappl-sys"
 version = "0.1.0"
 
