@@ -2,40 +2,40 @@
 
 *Last updated 2026-09-05 (second session).*
 
-**Where things stand.** The migration plan, the decision log and the non-goals
-are complete and all eleven questions are answered — Q-8a, the last open one,
-was decided this session: `pappl-sys` and `pappl` are `Apache-2.0 OR MIT`,
-everything else `GPL-2.0-only`. `libpappl-dev` **is** installed
-(1.3.1-2.1+b2), so the previous note's claim that it is missing is out of
-date. Branch `migration/pappl` is pushed to `origin`, and so is the
-`v1.x-final` tag, which is the recovery anchor for the working 1.x driver. It
-is an **annotated** tag: the tag object is `7c0cf2c` and it points at commit
-`33d4ff2`. `git ls-remote --tags origin` shows both, so the remote agrees.
+**Raise the hard-margin question first: it is open, it blocks the
+driver-capability table, and only the maintainer's hardware settles it.**
+Upstream SpliX gives the ML-2160 `HWMargins 10.75 15 10.75 15` and the ML-2165
+`12.5 12.5 12.5 12.5`, while this driver's PPD uses 12 pt on every edge — a
+value that traces to a defs file for different hardware and matches neither
+model. At 600 dpi those three values give 12, 14 and 13 hard-margin bytes
+respectively, so the difference is a whole byte column, about 0.34 mm, on a
+page that would look correct. Nothing has been changed:
+[`docs/MARGINS.md`](MARGINS.md) has the full trace, the byte table at every
+resolution and the three candidate resolutions, `docs/DECISIONS.md` carries it
+as an open Q-2 follow-up, and release gate G-1 now requires the measurement to
+name the exact model, per model rather than per family.
 
-**P2 is validated, not merely done.** The golden corpus was audited rather
-than trusted: all 15 original streams are reproduced byte-for-byte by the
-untouched `v1.x-final` binary (only the two pinned `SERVICEDATE` digits
-differ), and each of the five migration risks was injected as a one-line
-defect to confirm the suite goes red. R-5 — a reordered job-level PJL line —
-is caught by the golden corpus and by nothing else in the repository. The full
-record is `docs/GOLDEN-VALIDATION.md`, and `CONTRIBUTING.md` states the bless
-discipline that follows from it.
-
-**The corpus is now 32 cases**, closing the gaps that could only be captured
-while the 1.x encoder runs: `dst_offset > 0` (two synthetic cases, the branch
-that sits directly on R-1), all eleven PPD media sizes, Legal and Folio at
-every resolution, multi-page combined with multi-copy and the copy clamp, and
-a non-ASCII job title. `goldens/SHA256SUMS` pins the validated bytes. The
-band-order ceiling is proved across the whole matrix (worst case Legal
-@1200x1200, 129 of 256 bands) with a compile-time assertion bounding it from
-the validator's limits.
-
-**P3 has started.** `crates/pappl-sys` holds hand-written FFI for PAPPL 1.3:
-8 types, 128 fields, 69 constants and 45 functions, every declaration quoting
-the real prototype. The layout harness came first and is the thing to keep
-green — `probe/layout_probe.c` plus `tests/layout.rs` check every field
-offset, and `tests/symbols.rs` checks every symbol against the installed
-library. `docs/PAPPL-SYMBOLS.md` carries the Q-1 symbol table.
+Plan steps P1 to P4 are complete and pushed on `migration/pappl`; P5 is next
+and was deliberately not started. P2's golden corpus is validated rather than
+merely built — 32 cases, reproduced byte-for-byte from the untouched
+`v1.x-final` binary, with each of the five encoder risks R-1 to R-5 injected as a
+defect to prove the suite goes red, and R-5 caught by the corpus alone. (R-6,
+the libcups ABI risk, is not of that kind: it cannot be mutation-tested, and
+its mitigations are build-time, packaging and a runtime backstop.) P3 is
+`crates/pappl-sys`: hand-written FFI whose 8 types, 128 fields, 69 constants
+and 45 symbols are all checked against the installed headers and library by a
+C probe, with the check failing if any probed record is left unchecked. P4 is
+`crates/pappl`: the `guard` shim every `extern "C"` callback body passes
+through so no panic can unwind into C, borrowed `Device`/`Job` handles, and the
+`io::Write` implementation that lets the unchanged SPL2 encoder write to a
+PAPPL device. P5 covers the driver-capability table, the mainloop and the
+printable-area experiment, and carries two requirements written down where they
+will be seen: the hard-margin table cannot be finalised until the measurement
+above, and R-6/H requires the option-struct sanity check to **fail the job, not
+clamp**, because a clamp would delete the only runtime signal that the libcups
+ABI moved. Also outstanding, none of it blocking: SPDX headers on the GPL
+files and the PPD (Q-8b), and the Q-4 toner-save evidence that turned up in the
+SpliX source and is recorded in `docs/NON-GOALS.md`.
 
 ## Step numbering
 
@@ -61,37 +61,13 @@ The prompt series splits P3 into the bindings (its P3) and their layout tests
 before the first declaration. Where older documents in this repository say
 P11 or P12, they mean the rows above.
 
-**P4 has started.** `crates/pappl` holds the safe wrapper: `guard`, the
-`catch_unwind` shim every `extern "C"` callback body passes through; borrowed
-`Device` and `Job` handles with lifetimes and no `Drop`, because PAPPL owns
-those objects and closes them when the callback returns; a `LogLevel` enum; and
-an `io::Write` implementation for `Device`, which is the join that lets the
-unchanged SPL2 encoder write to a PAPPL device without knowing PAPPL exists.
-`tests/boundary.rs` calls a panicking callback through a real
-`pappl_pr_rstartjob_cb_t` function pointer and asserts it returns `false`
-rather than unwinding.
-
-**What to do next.** Finish P4 and move to P5: the driver-capability table,
-the mainloop, and the printable-area experiment. Owning wrappers with `Drop`
-belong to that step, when this crate starts creating PAPPL objects rather than
-borrowing them. Two things are deliberately left for when they are needed: the fields of
-`cups_page_header2_t` (bound as opaque storage today) and `cups_option_t`
-(opaque pointer) — both are CUPS headers and get the same transcription plus
-probe treatment. Also outstanding: SPDX headers and `license` fields for the
-FFI crates as they are created, the GPL-2 header on the PPD (Q-8b), and the
-exact SpliX copyright notice in `debian/copyright`, which needs a copy of the
-upstream source to transcribe.
-
-**Release gate G-1 is open and blocks 2.0.** R-1 — the hard margin — is
-validated only against itself until a registration-mark page is printed on
-real hardware and measured against the PPD's `*ImageableArea`. No printer is
-attached to this machine. The gate lands in P12; see
-`docs/GOLDEN-VALIDATION.md` §4.
-
-**Reading order for a fresh agent:** this file, then `docs/DECISIONS.md`,
-`docs/GOLDEN-VALIDATION.md` and `CONTRIBUTING.md`, then
-`docs/MIGRATION-PLAN.md` §7 and §9 for the target layout and the corruption
-risks, then `goldens/README.md` and `src/golden.rs`. The byte-for-byte
+**Reading order for a fresh agent:** this file, then
+[`docs/MARGINS.md`](MARGINS.md) and `docs/DECISIONS.md`, then
+`docs/GOLDEN-VALIDATION.md` and `CONTRIBUTING.md` for how output is verified
+and what blessing a golden requires, then `docs/MIGRATION-PLAN.md` §7 and §9
+for the target layout and the six corruption risks. The byte-for-byte
 behaviour itself lives in `src/main.rs` around `compute_page_width_pixels`,
 `hard_margin_bytes` and `band_placement`, and in `src/spl.rs` around
 `begin_job`, `begin_page`, `write_compressed_band`, `end_page` and `end_job`.
+The `v1.x-final` recovery anchor is an annotated tag: object `7c0cf2c`,
+commit `33d4ff2`, both present on `origin`.
