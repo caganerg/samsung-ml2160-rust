@@ -3,9 +3,46 @@ Upstream-Name: samsung-ml2160-rust
 Source: https://github.com/caganerg/samsung-ml2160-rust
 
 Files: *
+Copyright: 2025-2026 Çağan ERGÜN <73942784+caganerg@users.noreply.github.com>
 License: GPL-2
  The SPL2/QPDL protocol implementation is derived from the GPLv2-licensed
  OpenPrinting SpliX project, so this driver is licensed to match.
+
+Files: src/spl.rs
+       src/main.rs
+       ppd/samsung-ml2160.ppd
+Copyright: 2025-2026 Çağan ERGÜN <73942784+caganerg@users.noreply.github.com>
+           Aurélien Croc (AP²C) and the OpenPrinting SpliX contributors
+License: GPL-2
+ These three files carry material transcribed from OpenPrinting SpliX
+ (https://github.com/OpenPrinting/splix), which is GPL-2.0-only. They are
+ therefore a derived work and this package cannot be relicensed as GPL-2+.
+ .
+ src/spl.rs states the derivation in its own header: the QPDL wire constants,
+ the PJL job header and its exact line order, the 17-byte page header layout
+ and the Algo 0x11 RLE band encoding all come from SpliX's qpdl.cpp,
+ compress.cpp, algo0x11.cpp and printer.cpp.
+ .
+ src/main.rs transcribes SpliX's geometry rules, each cited at the function
+ that implements it: the page-width computation from document.cpp, the hard
+ margin and column-major band fill from compress.cpp _compressBandedPage, the
+ duplex mapping from request.cpp, and the "halve the band height at 300x300"
+ rule from compress.cpp.
+ .
+ ppd/samsung-ml2160.ppd takes its QPDL paper-source codes, media-type
+ keywords and band size from the sibling PPDs upstream SpliX ships for this
+ engine family (ml1910, ml2010, ml2525, ml1640, ml2510), as its own comments
+ record.
+ .
+ src/raster.rs and src/golden.rs are NOT derived from SpliX: raster.rs
+ implements the CUPS Raster container format, and golden.rs is this project's
+ own test harness. Each mentions SpliX once, as a cross-reference rather than
+ as transcribed material.
+Comment: The upstream attribution above names the SpliX author and project but
+ omits the year range, because the exact copyright notice must be transcribed
+ from the SpliX source headers and no copy of that source was available on the
+ machine where this stanza was written. Before the first upload, copy the
+ notice verbatim from the upstream tree.
 
 Files: crates/pappl-sys/*
        crates/pappl/*
