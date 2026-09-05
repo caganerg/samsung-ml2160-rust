@@ -1,8 +1,8 @@
 {
-  "case": "a4-600-marks-v2rle",
+  "case": "envdl-600-marks",
   "note": "The classic CUPS page header, and the QPDL placement the filter derived from it. The option mapping on the PAPPL side is validated against this.",
   "input": {
-    "encoding": "RaS2",
+    "encoding": "RaS3",
     "pages": 1,
     "content": "registration-marks",
     "job_title": "golden",
@@ -10,18 +10,18 @@
   },
   "cups_page_header": {
     "MediaType": "",
-    "cupsPageSizeName": "A4",
+    "cupsPageSizeName": "EnvDL",
     "HWResolution": [600, 600],
-    "PageSize": [595, 842],
-    "ImagingBoundingBox": [12, 12, 583, 830],
+    "PageSize": [312, 624],
+    "ImagingBoundingBox": [12, 12, 300, 612],
     "Margins": [12, 12],
     "MediaPosition": 0,
     "NumCopies": 1,
     "Duplex": false,
     "Tumble": false,
-    "cupsWidth": 4758,
-    "cupsHeight": 6817,
-    "cupsBytesPerLine": 595,
+    "cupsWidth": 2400,
+    "cupsHeight": 5000,
+    "cupsBytesPerLine": 300,
     "cupsBitsPerColor": 1,
     "cupsBitsPerPixel": 1,
     "cupsColorOrder": 0,
@@ -29,19 +29,19 @@
     "cupsCompression": 0
   },
   "derived_qpdl": {
-    "page_width_pixels": 4960,
-    "band_width_bytes": 620,
+    "page_width_pixels": 2600,
+    "band_width_bytes": 325,
     "band_height_lines": 128,
     "hard_margin_bytes": 13,
     "dst_offset_bytes": 0,
     "src_skip_bytes": 1,
-    "paper_size_code": 2,
+    "paper_size_code": 9,
     "paper_source_code": 1,
     "copies_sent": 1
   },
   "ppd_source": {
-    "PageSize": "A4",
-    "PaperDimension": "595 842",
-    "ImageableArea": "12 12 583 830"
+    "PageSize": "EnvDL",
+    "PaperDimension": "312 624",
+    "ImageableArea": "12 12 300 612"
   }
 }

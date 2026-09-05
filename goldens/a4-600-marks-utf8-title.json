@@ -1,11 +1,11 @@
 {
-  "case": "a4-600-marks-v2rle",
+  "case": "a4-600-marks-utf8-title",
   "note": "The classic CUPS page header, and the QPDL placement the filter derived from it. The option mapping on the PAPPL side is validated against this.",
   "input": {
-    "encoding": "RaS2",
+    "encoding": "RaS3",
     "pages": 1,
     "content": "registration-marks",
-    "job_title": "golden",
+    "job_title": "Örnek Çıktı — ünlü ğüş İŞ",
     "synthetic": false
   },
   "cups_page_header": {

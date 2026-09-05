@@ -110,6 +110,90 @@ const ENV_C5: Media = Media {
     dimension_pt: (459, 649),
     imageable_pt: (12, 12, 447, 637),
 };
+const LEGAL: Media = Media {
+    ppd_key: "Legal",
+    dimension_pt: (612, 1008),
+    imageable_pt: (12, 12, 600, 996),
+};
+const FOLIO: Media = Media {
+    ppd_key: "Folio",
+    dimension_pt: (595, 935),
+    imageable_pt: (12, 12, 583, 923),
+};
+const EXECUTIVE: Media = Media {
+    ppd_key: "Executive",
+    dimension_pt: (522, 756),
+    imageable_pt: (12, 12, 510, 744),
+};
+const A6: Media = Media {
+    ppd_key: "A6",
+    dimension_pt: (297, 420),
+    imageable_pt: (12, 12, 285, 408),
+};
+const B5: Media = Media {
+    ppd_key: "B5",
+    dimension_pt: (516, 729),
+    imageable_pt: (12, 12, 504, 717),
+};
+const ENV_10: Media = Media {
+    ppd_key: "Env10",
+    dimension_pt: (297, 684),
+    imageable_pt: (12, 12, 285, 672),
+};
+const ENV_DL: Media = Media {
+    ppd_key: "EnvDL",
+    dimension_pt: (312, 624),
+    imageable_pt: (12, 12, 300, 612),
+};
+
+/// Every medium the PPD declares. `test_golden_media_matches_ppd` checks each
+/// one against `ppd/samsung-ml2160.ppd`, and
+/// `test_golden_corpus_covers_every_ppd_medium` checks that each one has a
+/// golden case: the hard-margin table is per-size, so an uncovered size is an
+/// uncovered margin.
+const PPD_MEDIA: &[Media] = &[
+    A4, LETTER, LEGAL, EXECUTIVE, A5, A6, B5, ENV_10, ENV_DL, ENV_C5, FOLIO,
+];
+
+/// The resolutions the PPD declares.
+const PPD_RESOLUTIONS: &[(u32, u32)] = &[(300, 300), (600, 600), (1200, 600), (1200, 1200)];
+
+// --- Synthetic media: the ONLY way to reach `dst_offset > 0` ---------------
+//
+// `band_placement` positions the CUPS line as `centred - hard_margin`. Every
+// medium in this PPD has a 12 pt left margin, which at every supported
+// resolution makes the hard margin greater than or equal to the centring
+// offset, so `dst_offset` is 0 in every realistic case and only `src_skip`
+// varies. The positive branch is therefore unreachable from the shipped PPD —
+// and it is exactly the branch that activates the first time PAPPL hands us a
+// different margin (R-1). These two media exist to freeze it.
+//
+// They are FABRICATED: no printer reports these imageable areas. What they do
+// keep real is the sheet size — `validate_page_header` rejects any
+// `PageSize` that is not an exact known QPDL paper size, so both reuse A4's
+// 595 x 842 pt sheet and vary only the imageable area, i.e. exactly the two
+// header fields (`Margins[0]`, `cupsWidth`) that PAPPL could plausibly
+// deliver differently. `test_golden_synthetic_media_use_a_real_sheet` enforces
+// that.
+
+/// A4 sheet, 6 pt left margin, near-full-width imageable area: hard margin 7 B
+/// against a centring offset of 21 B, so `dst_offset` = 14.
+const SYNTH_A4_NARROW_MARGIN: Media = Media {
+    ppd_key: "A4",
+    dimension_pt: (595, 842),
+    imageable_pt: (6, 12, 560, 830),
+};
+
+/// A4 sheet, 12 pt left margin but a much narrower imageable area: hard margin
+/// 13 B against a centring offset of 107 B, so `dst_offset` = 94.
+const SYNTH_A4_NARROW_AREA: Media = Media {
+    ppd_key: "A4",
+    dimension_pt: (595, 842),
+    imageable_pt: (12, 12, 400, 830),
+};
+
+/// The fabricated media, kept out of `PPD_MEDIA` so the PPD checks stay honest.
+const SYNTHETIC_MEDIA: &[Media] = &[SYNTH_A4_NARROW_MARGIN, SYNTH_A4_NARROW_AREA];
 
 /// The pixel rounding `cups-filters` performs: `round(pt * dpi / 72)`.
 ///
@@ -170,6 +254,9 @@ struct Case {
     pages: u32,
     content: Content,
     encoding: Encoding,
+    /// The job title passed as argv[3]. Fixed per case so the PJL job-name
+    /// line stays deterministic.
+    title: &'static str,
 }
 
 impl Case {
@@ -184,6 +271,7 @@ impl Case {
             pages: 1,
             content: Content::RegistrationMarks,
             encoding: Encoding::V3,
+            title: GOLDEN_TITLE,
         }
     }
 
@@ -258,6 +346,44 @@ const CASES: &[Case] = &[
     Case {
         encoding: Encoding::V2Rle,
         ..Case::new("a4-600-marks-v2rle", A4, (600, 600))
+    },
+    // --- every remaining PPD medium at the default resolution ---
+    Case::new("legal-600-marks", LEGAL, (600, 600)),
+    Case::new("folio-600-marks", FOLIO, (600, 600)),
+    Case::new("executive-600-marks", EXECUTIVE, (600, 600)),
+    Case::new("a6-600-marks", A6, (600, 600)),
+    Case::new("b5-600-marks", B5, (600, 600)),
+    Case::new("env10-600-marks", ENV_10, (600, 600)),
+    Case::new("envdl-600-marks", ENV_DL, (600, 600)),
+    // --- the two geometric extremes at every resolution ---
+    Case::new("legal-300-marks", LEGAL, (300, 300)),
+    Case::new("legal-1200x600-marks", LEGAL, (1200, 600)),
+    Case::new("legal-1200-marks", LEGAL, (1200, 1200)),
+    Case::new("folio-300-marks", FOLIO, (300, 300)),
+    Case::new("folio-1200x600-marks", FOLIO, (1200, 600)),
+    Case::new("folio-1200-marks", FOLIO, (1200, 1200)),
+    // --- synthetic: the only cases with dst_offset > 0 ---
+    Case::new("synth-a4-600-dst14", SYNTH_A4_NARROW_MARGIN, (600, 600)),
+    Case::new("synth-a4-600-dst94", SYNTH_A4_NARROW_AREA, (600, 600)),
+    // --- copies clamp combined with multiple pages ---
+    //
+    // 1000 copies is above MAX_REALISTIC_COPIES, so `sanitize_copies` clamps
+    // it to 999; the clamped value is written into the page header AND the
+    // end-of-page footer, on each of the two pages. That combination is what
+    // R-5 warns can silently turn into copies squared.
+    Case {
+        copies: 1000,
+        pages: 2,
+        ..Case::new("a4-600-marks-2pages-1000copies", A4, (600, 600))
+    },
+    // --- non-ASCII job metadata ---
+    //
+    // PAPPL passes the IPP job-name through as UTF-8; the classic filter path
+    // rarely saw anything but ASCII. This freezes what `quote_untrusted` makes
+    // of a multi-byte title before that changes.
+    Case {
+        title: "Örnek Çıktı — ünlü ğüş İŞ",
+        ..Case::new("a4-600-marks-utf8-title", A4, (600, 600))
     },
 ];
 
@@ -427,11 +553,13 @@ fn build_sidecar(case: &Case) -> String {
     format!(
         r#"{{
   "case": "{name}",
-  "note": "Klasik CUPS sayfa başlığı ve filtrenin ondan türettiği QPDL yerleşimi. PAPPL tarafındaki seçenek eşlemesi buna karşı doğrulanacak.",
+  "note": "The classic CUPS page header, and the QPDL placement the filter derived from it. The option mapping on the PAPPL side is validated against this.",
   "input": {{
     "encoding": "{encoding}",
     "pages": {pages},
-    "content": "{content}"
+    "content": "{content}",
+    "job_title": "{job_title}",
+    "synthetic": {synthetic}
   }},
   "cups_page_header": {{
     "MediaType": "{media_type}",
@@ -477,6 +605,11 @@ fn build_sidecar(case: &Case) -> String {
             Encoding::V2Rle => "RaS2",
         },
         pages = case.pages,
+        job_title = json_escape(case.title),
+        synthetic = SYNTHETIC_MEDIA
+            .iter()
+            .any(|m| m.imageable_pt == case.media.imageable_pt
+                && m.dimension_pt == case.media.dimension_pt),
         content = match case.content {
             Content::Blank => "blank",
             Content::RegistrationMarks => "registration-marks",
@@ -531,7 +664,7 @@ fn run_case(case: &Case) -> Vec<u8> {
     let args = CupsFilterArgs {
         job_id: Some("1".to_string()),
         user: Some(GOLDEN_USER.to_string()),
-        title: Some(GOLDEN_TITLE.to_string()),
+        title: Some(case.title.to_string()),
         num_copies: None,
         options: None,
         filename: None,
@@ -734,7 +867,7 @@ fn test_golden_media_matches_ppd() {
     ))
     .expect("could not read the PPD");
 
-    for media in [A4, LETTER, A5, ENV_C5] {
+    for media in PPD_MEDIA.iter().copied() {
         let dim_line = format!("*PaperDimension {}/", media.ppd_key);
         let dim = ppd
             .lines()
@@ -828,4 +961,153 @@ fn test_golden_service_date_is_pinned() {
             "the golden stream must not carry today's date"
         );
     }
+}
+
+/// Every medium the PPD declares must have at least one golden case.
+///
+/// The hard-margin table is per-size, so a size with no golden is a margin
+/// with no golden — which is the R-1 failure mode one size at a time.
+#[test]
+fn test_golden_corpus_covers_every_ppd_medium() {
+    for media in PPD_MEDIA.iter().copied() {
+        let found = CASES.iter().any(|c| {
+            c.media.ppd_key == media.ppd_key && c.media.imageable_pt == media.imageable_pt
+        });
+        assert!(found, "no golden case for PPD medium {}", media.ppd_key);
+    }
+}
+
+/// The two geometric extremes must be covered at every supported resolution.
+///
+/// Legal is the tallest sheet and Folio the second tallest, so they produce
+/// the largest line counts, the most bands, and the widest hard margins.
+#[test]
+fn test_golden_corpus_covers_the_extremes_at_every_resolution() {
+    for media in [LEGAL, FOLIO] {
+        for res in PPD_RESOLUTIONS.iter().copied() {
+            let found = CASES
+                .iter()
+                .any(|c| c.media.ppd_key == media.ppd_key && c.resolution == res);
+            assert!(
+                found,
+                "no golden case for {} @ {}x{}",
+                media.ppd_key, res.0, res.1
+            );
+        }
+    }
+}
+
+/// The synthetic media must fabricate only the imageable area, never the
+/// sheet.
+///
+/// `validate_page_header` rejects any `PageSize` that is not an exact known
+/// QPDL paper size, so a fully invented sheet would be rejected by the filter
+/// rather than exercising the placement branch we are trying to freeze.
+#[test]
+fn test_golden_synthetic_media_use_a_real_sheet() {
+    for synth in SYNTHETIC_MEDIA.iter().copied() {
+        let sheet_is_real = PPD_MEDIA
+            .iter()
+            .any(|m| m.dimension_pt == synth.dimension_pt);
+        assert!(
+            sheet_is_real,
+            "synthetic medium {:?} does not use a real PPD sheet size",
+            synth.dimension_pt
+        );
+        assert!(
+            SplPaperSize::from_dimensions_pt_exact(synth.dimension_pt.0, synth.dimension_pt.1)
+                .is_some(),
+            "synthetic medium {:?} is not a recognised QPDL paper size",
+            synth.dimension_pt
+        );
+    }
+}
+
+/// The `dst_offset > 0` branch of `band_placement` must be covered by at
+/// least two cases with DISTINCT offsets.
+///
+/// One case would prove the branch runs; two different values prove the
+/// offset is actually derived rather than constant.
+#[test]
+fn test_golden_corpus_covers_positive_dst_offset() {
+    let mut offsets: Vec<usize> = Vec::new();
+    for case in CASES {
+        let header_bytes = build_page_header(case);
+        let header = PageHeader::parse(&header_bytes, CupsRasterVersion::V3Be)
+            .expect("the generated header should parse");
+        let band_width_bytes =
+            compute_page_width_pixels(header.page_size_points[0], header.hw_resolution[0])
+                .div_ceil(8);
+        let placement = band_placement(
+            band_width_bytes as usize,
+            header.bytes_per_line as usize,
+            hard_margin_bytes(header.margins[0], header.hw_resolution[0]),
+        )
+        .expect("a golden case must produce a valid placement");
+        if placement.dst_offset > 0 {
+            offsets.push(placement.dst_offset);
+        }
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    assert!(
+        offsets.len() >= 2,
+        "the corpus must cover dst_offset > 0 with at least two distinct values, found {:?}",
+        offsets
+    );
+}
+
+/// The QPDL band-order field is 8 bits wide, so a page may carry at most 256
+/// bands. Prove the ceiling across the WHOLE matrix, not one sampled case.
+///
+/// For every PPD medium at every supported resolution, this computes the band
+/// count the filter would send — the imageable line count divided by the band
+/// height `band_height_for` chooses — and asserts it stays inside the field.
+/// The worst case is Legal at 1200x1200: 16400 lines in 128-line bands, so
+/// 129 bands, which is roughly half the ceiling.
+///
+/// The 64-line band height never combines with a high line count, which is
+/// what keeps the margin so wide: it is selected only when BOTH axes are 300
+/// dpi, and at 300 dpi the same sheet produces a quarter of the lines.
+///
+/// A header outside this matrix cannot reach the ceiling either: the
+/// compile-time assertion next to `band_height_for` bounds it from the
+/// validator's own limits, and `write_compressed_band` fails the job with a
+/// specific error rather than wrapping the band index.
+#[test]
+fn test_band_count_stays_inside_the_qpdl_band_order_field() {
+    const CEILING: u32 = u8::MAX as u32 + 1;
+    let mut worst = (0u32, "", (0u32, 0u32));
+
+    for media in PPD_MEDIA.iter().copied() {
+        for res in PPD_RESOLUTIONS.iter().copied() {
+            let case = Case::new("matrix-probe", media, res);
+            let header_bytes = build_page_header(&case);
+            let header = PageHeader::parse(&header_bytes, CupsRasterVersion::V3Be)
+                .expect("the generated header should parse");
+            let band_height = band_height_for(&header) as u32;
+            let bands = header.height.div_ceil(band_height);
+
+            assert!(
+                bands <= CEILING,
+                "{} @ {}x{}: {} lines / {} = {} bands, over the {}-band ceiling",
+                media.ppd_key,
+                res.0,
+                res.1,
+                header.height,
+                band_height,
+                bands,
+                CEILING
+            );
+            if bands > worst.0 {
+                worst = (bands, media.ppd_key, res);
+            }
+        }
+    }
+
+    assert_eq!(
+        worst,
+        (129, "Legal", (1200, 1200)),
+        "the worst case in the matrix moved; re-check the ceiling argument"
+    );
 }

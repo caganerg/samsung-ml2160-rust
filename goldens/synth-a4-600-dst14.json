@@ -1,27 +1,27 @@
 {
-  "case": "a4-600-marks-v2rle",
+  "case": "synth-a4-600-dst14",
   "note": "The classic CUPS page header, and the QPDL placement the filter derived from it. The option mapping on the PAPPL side is validated against this.",
   "input": {
-    "encoding": "RaS2",
+    "encoding": "RaS3",
     "pages": 1,
     "content": "registration-marks",
     "job_title": "golden",
-    "synthetic": false
+    "synthetic": true
   },
   "cups_page_header": {
     "MediaType": "",
     "cupsPageSizeName": "A4",
     "HWResolution": [600, 600],
     "PageSize": [595, 842],
-    "ImagingBoundingBox": [12, 12, 583, 830],
-    "Margins": [12, 12],
+    "ImagingBoundingBox": [6, 12, 560, 830],
+    "Margins": [6, 12],
     "MediaPosition": 0,
     "NumCopies": 1,
     "Duplex": false,
     "Tumble": false,
-    "cupsWidth": 4758,
+    "cupsWidth": 4617,
     "cupsHeight": 6817,
-    "cupsBytesPerLine": 595,
+    "cupsBytesPerLine": 578,
     "cupsBitsPerColor": 1,
     "cupsBitsPerPixel": 1,
     "cupsColorOrder": 0,
@@ -32,9 +32,9 @@
     "page_width_pixels": 4960,
     "band_width_bytes": 620,
     "band_height_lines": 128,
-    "hard_margin_bytes": 13,
-    "dst_offset_bytes": 0,
-    "src_skip_bytes": 1,
+    "hard_margin_bytes": 7,
+    "dst_offset_bytes": 14,
+    "src_skip_bytes": 0,
     "paper_size_code": 2,
     "paper_source_code": 1,
     "copies_sent": 1
@@ -42,6 +42,6 @@
   "ppd_source": {
     "PageSize": "A4",
     "PaperDimension": "595 842",
-    "ImageableArea": "12 12 583 830"
+    "ImageableArea": "6 12 560 830"
   }
 }

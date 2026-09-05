@@ -1,10 +1,12 @@
 {
   "case": "a4-600-blank",
-  "note": "Klasik CUPS sayfa başlığı ve filtrenin ondan türettiği QPDL yerleşimi. PAPPL tarafındaki seçenek eşlemesi buna karşı doğrulanacak.",
+  "note": "The classic CUPS page header, and the QPDL placement the filter derived from it. The option mapping on the PAPPL side is validated against this.",
   "input": {
     "encoding": "RaS3",
     "pages": 1,
-    "content": "blank"
+    "content": "blank",
+    "job_title": "golden",
+    "synthetic": false
   },
   "cups_page_header": {
     "MediaType": "",

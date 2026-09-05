@@ -1,9 +1,9 @@
 {
-  "case": "a4-600-marks-v2rle",
+  "case": "a4-600-marks-2pages-1000copies",
   "note": "The classic CUPS page header, and the QPDL placement the filter derived from it. The option mapping on the PAPPL side is validated against this.",
   "input": {
-    "encoding": "RaS2",
-    "pages": 1,
+    "encoding": "RaS3",
+    "pages": 2,
     "content": "registration-marks",
     "job_title": "golden",
     "synthetic": false
@@ -16,7 +16,7 @@
     "ImagingBoundingBox": [12, 12, 583, 830],
     "Margins": [12, 12],
     "MediaPosition": 0,
-    "NumCopies": 1,
+    "NumCopies": 1000,
     "Duplex": false,
     "Tumble": false,
     "cupsWidth": 4758,
@@ -37,7 +37,7 @@
     "src_skip_bytes": 1,
     "paper_size_code": 2,
     "paper_source_code": 1,
-    "copies_sent": 1
+    "copies_sent": 999
   },
   "ppd_source": {
     "PageSize": "A4",

@@ -598,6 +598,39 @@ fn band_height_for(header: &PageHeader) -> usize {
     }
 }
 
+/// The QPDL band-order field is 8 bits wide, so a page may carry at most 256
+/// bands; `write_compressed_band` fails the job rather than wrapping the
+/// index. This assertion proves the job can never legitimately be refused for
+/// that reason, from the validator's own limits rather than from the media
+/// table:
+///
+/// * A page is at most `MAX_POINTS` tall and its vertical resolution at most
+///   `MAX_DPI` (`validate_page_header`), so it carries at most
+///   `MAX_POINTS * MAX_DPI / 72` lines — 21667, or 170 bands of 128.
+/// * The halved band height is selected only when BOTH axes are 300 dpi, so
+///   the 64-line band can only ever pair with a 300 dpi line count: 5417
+///   lines, or 85 bands.
+///
+/// Both are inside the field with room to spare; the worst case reachable
+/// from the PPD itself is Legal at 1200x1200, 129 bands
+/// (`test_band_count_stays_inside_the_qpdl_band_order_field`). If the paper
+/// table, the resolution list or `QPDL_BAND_HEIGHT` ever change enough to
+/// break that, this fails at compile time instead of on paper.
+const _: () = {
+    const CEILING: usize = u8::MAX as usize + 1;
+    // `usize::div_ceil` is not const, so the rounding is spelled out here.
+    #[allow(clippy::manual_div_ceil)]
+    const fn div_ceil(a: usize, b: usize) -> usize {
+        (a + b - 1) / b
+    }
+
+    let lines_at_max_dpi = div_ceil(MAX_POINTS as usize * MAX_DPI as usize, 72);
+    assert!(div_ceil(lines_at_max_dpi, QPDL_BAND_HEIGHT) <= CEILING);
+
+    let lines_at_300_dpi = div_ceil(MAX_POINTS as usize * 300, 72);
+    assert!(div_ceil(lines_at_300_dpi, QPDL_BAND_HEIGHT / 2) <= CEILING);
+};
+
 /// Tek bir baskı işinde işlenecek azami sayfa sayısı.
 ///
 /// Sayfa döngüsünün üst sınırı yoktu: akış ne kadar uzunsa o kadar sayfa
