@@ -144,11 +144,20 @@ condition on shipping, so that a green test suite is never mistaken for a
 verified margin.
 
 > **G-1.** 2.0 does not ship until a registration-mark golden has been printed
-> on an ML-216x through the 1.x path and its margins measured against
+> through the 1.x path and its margins measured against
 > `ppd/samsung-ml2160.ppd`'s `*ImageableArea` (12 pt = 4.23 mm on every
-> medium). The measured values, the medium and the resolution are recorded in
-> this document. If they disagree with the PPD, the hard-margin table is wrong
-> and every golden that depends on it is re-captured before 2.0 is built.
+> medium). The record must name **the exact model measured**, the medium, the
+> resolution and the measured distance. If the measurement disagrees with the
+> PPD, the hard-margin table is wrong and every golden that depends on it is
+> re-captured before 2.0 is built.
+>
+> **Per model, not per family.** Upstream SpliX gives the ML-2160 and the
+> ML-2165 *different* hard margins, and neither matches the 12 pt this driver
+> uses (`docs/MARGINS.md`). Measuring an ML-2160 therefore does not clear the
+> gate for an ML-2165, or the reverse. G-1 requires a measurement for **every
+> model the package claims to support** — the README and the PPD currently
+> name ML-2160, ML-2165, ML-2165W and ML-2168 — or the claim is narrowed to
+> the models actually measured.
 
 The gate lands naturally in **P12**, which needs the printer connected anyway:
 the same session that prints the first PAPPL job can print the 1.x reference

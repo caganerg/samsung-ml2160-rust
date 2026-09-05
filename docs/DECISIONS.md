@@ -98,31 +98,34 @@ PAPPL delivers `cupsWidth`/`cupsHeight` and scanlines for the *printable area*
 or the *full media*. To be answered by experiment, not documentation, and
 written up in `docs/MARGINS.md`.
 
-#### Q-2 follow-up — upstream says ML-2165 has a different margin
+#### Q-2 follow-up — OPEN: upstream's margins disagree with ours, per model
+
+**Status: open, blocking the driver-capability table. Awaiting a hardware
+measurement; see [`docs/MARGINS.md`](MARGINS.md) for the full trace and the
+three candidate resolutions.** The margin table has not been changed.
 
 Found on 2026-09-05 while fetching the SpliX source to settle the copyright
-attribution, and recorded here because it bears directly on R-1 and on which
-printer gate G-1 should be measured against.
+attribution, and recorded because it bears directly on R-1 and on which model
+gate G-1 must be measured against.
 
 SpliX's `ppd/samsung.drv.in` puts the ML-2165 (and ML-1915) in their own block
-with an explicit override:
+with an explicit override, `HWMargins 12.5 12.5 12.5 12.5`
+(`samsung.drv.in:274`), commented "different margins than the other monochrome
+printers". The ML-2160 is not in that block: it inherits
+`HWMargins 10.75 15 10.75 15` from `ppd/spl2.defs:10`. Our
+`ppd/samsung-ml2160.ppd` declares 12 pt on every edge, which matches
+`spl2bandedjbig.defs` — a file that belongs to the banded-JBIG **colour**
+printers, not to the ML-216x.
 
-```
-// ML-1915/ML-2165 printers (different margins than the other monochrome
-// printers)
-{
-    HWMargins 12.5 12.5 12.5 12.5
-```
-
-while the ML-2160 sits in the general monochrome group, whose defs set
-`HWMargins 12 12 12 12` (`ppd/spl2bandedjbig.defs`). Our
-`ppd/samsung-ml2160.ppd` declares 12 pt for every medium and is named for the
-whole "ML-2160 Series", and the README advertises ML-2165/2165W.
+So our value matches neither model upstream describes, and upstream's ML-2160
+margin is asymmetric where ours is square.
 
 Half a point sounds negligible and is not: `hard_margin_bytes` rounds up to a
-whole 8-pixel column, so 12 pt gives 13 bytes at 600 dpi and 12.5 pt gives 14 —
-a one-byte, 8-pixel, ~0.34 mm shift, and two bytes at 1200 dpi. That is exactly
-the R-1 failure mode, and it would look like a correctly printed page.
+whole 8-pixel column, so at 600 dpi 10.75 pt gives 12 bytes, 12 pt gives 13 and
+12.5 pt gives 14 — and at 1200 dpi 23, 25 and 27. Each step is 8 or 16 pixels,
+both ≈ 0.34 mm. That is exactly the R-1 failure mode, and it would look like a
+correctly printed page. At 300 dpi the 12 and 12.5 pt cases collapse to the
+same 7 bytes, so the question is invisible at that resolution.
 
 **Not changed, deliberately.** Changing the margin table changes the bytes sent
 to the printer and moves every golden; and upstream's `.drv` is evidence about
