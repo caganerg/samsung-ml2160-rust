@@ -59,7 +59,7 @@ fn probe() -> HashMap<String, Record> {
                 offset: a as usize,
                 size: f.next().expect("size").parse().expect("numeric"),
             },
-            "E" => Record::Enum { value: a },
+            "E" | "V" => Record::Enum { value: a },
             other => panic!("unknown probe record kind {other:?}"),
         };
         assert!(
@@ -127,6 +127,22 @@ macro_rules! check_enum {
 fn test_every_probed_record_matches_the_rust_declaration() {
     let map = probe();
 
+    // ---- the CUPS ABI the raster header was measured against -------------
+    //
+    // R-6: cups_page_header2_t belongs to CUPS and is embedded by value at the
+    // start of pappl_pr_options_t. A libcups release that changed its layout
+    // would move every field after it, and would do so without changing a
+    // single symbol — so nothing the linker records would catch it. This is
+    // the build-time half of the mitigation; the runtime half is the geometry
+    // validation the driver performs on every page.
+    check_enum!(&map, "CUPS_VERSION_MAJOR", CUPS_ABI_MAJOR as i64);
+    check_enum!(&map, "CUPS_VERSION_MINOR", CUPS_ABI_MINOR as i64);
+    mark("CUPS_VERSION_PATCH"); // patch level does not change the layout
+    assert!(
+        map.contains_key("CUPS_VERSION_PATCH"),
+        "the probe must report the CUPS patch level"
+    );
+
     // ---- types ----------------------------------------------------------
     check_type!(&map, pappl_pr_driver_data_t, "pappl_pr_driver_data_t");
     check_type!(&map, pappl_pr_options_t, "pappl_pr_options_t");
@@ -136,6 +152,11 @@ fn test_every_probed_record_matches_the_rust_declaration() {
     check_type!(&map, pappl_supply_t, "pappl_supply_t");
     check_type!(&map, pappl_dither_t, "pappl_dither_t");
     check_type!(&map, cups_page_header2_t, "cups_page_header2_t");
+    assert_eq!(
+        size_of::<cups_page_header2_t>(),
+        CUPS_PAGE_HEADER2_SIZE,
+        "the hardcoded raster-header size no longer matches the type"
+    );
 
     // ---- limits ---------------------------------------------------------
     check_enum!(&map, "PAPPL_MAX_BIN", PAPPL_MAX_BIN as i64);

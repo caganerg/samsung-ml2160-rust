@@ -473,6 +473,50 @@ better — but three things can change silently:
   PAPPL may also implement copies itself by replaying pages. If both happen,
   the job prints copies², silently, and only for multi-copy jobs.
 
+### R-6 — libcups changes `cups_page_header2_t` and nothing tells us
+`pappl_pr_options_t` embeds `cups_page_header2_t` **by value as its first
+member** (`printer.h`), so that struct's layout is part of PAPPL's ABI even
+though it belongs to CUPS. If a libcups release changed it, every field after
+it — `copies`, `media`, `printer_resolution`, `sides` — would move.
+
+The reason this is a real exposure rather than a theoretical one is that
+**nothing in the link chain would notice**:
+
+* We reference no libcups *symbol*: we only use the struct's layout. The
+  linker's default `--as-needed` therefore drops `-lcups` entirely. Verified
+  by building a binary against `pappl-sys` and reading its `NEEDED` entries —
+  `libpappl.so.1`, `libgcc_s`, `libc`, and no `libcups.so.2`. So
+  `${shlibs:Depends}` records no libcups dependency at all.
+* Debian's `libpappl1t64` ships a **symbols** file (`@Base 1.0.1` style
+  entries), which versions *symbols*. A struct layout change with unchanged
+  symbols produces no dependency bump.
+* `libpappl.so.1`'s soname is PAPPL's own. Whether it would necessarily change
+  if PAPPL's public struct layout changed underneath it could not be
+  established from anything installed here, so per the rule for undetermined
+  ABI questions this is treated as exposed rather than covered.
+
+*Mitigation, in three layers:*
+1. **Build time.** `probe/layout_probe.c` reports `CUPS_VERSION_MAJOR/MINOR`
+   and the measured struct size; `tests/layout.rs` asserts both against
+   `CUPS_ABI_MAJOR`/`CUPS_ABI_MINOR`/`CUPS_PAGE_HEADER2_SIZE` in `pappl-sys`.
+   A rebuild against a CUPS whose raster header moved fails the test.
+2. **Package time.** `packaging/debian/control` carries an explicit
+   `libcups2-dev` build-dependency and a versioned `libcups2t64` runtime
+   dependency, because the automatic machinery cannot derive either.
+3. **Run time.** No introspection is possible — neither PAPPL nor libcups
+   exports its own `sizeof`, and libcups exports no runtime version accessor
+   (`httpGetVersion` reports the HTTP protocol version, not the library's).
+   The backstop is therefore the geometry validation the driver already
+   performs on every page: a shifted layout turns `copies`,
+   `printer_resolution` and the media dimensions into implausible values, and
+   the D-01/D-02 checks refuse the job instead of printing from them. That
+   check must be written to treat a nonsensical options struct as a hard
+   error, never as something to clamp — see the "no silent fallbacks" rule
+   this project already follows for margins.
+
+*Status:* layers 1 and 2 are in place. Layer 3 lands with the raster
+callbacks, when the option fields are first read.
+
 **Honourable mentions** (real, but louder when they break): the 1-based
 `page_number` feeding the tumble parity byte (`spl.rs:933`); the `u8` band-index
 ceiling at 256 bands per page (`spl.rs:986`); `PJL_END`'s leading TAB

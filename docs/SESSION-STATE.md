@@ -8,7 +8,9 @@ was decided this session: `pappl-sys` and `pappl` are `Apache-2.0 OR MIT`,
 everything else `GPL-2.0-only`. `libpappl-dev` **is** installed
 (1.3.1-2.1+b2), so the previous note's claim that it is missing is out of
 date. Branch `migration/pappl` is pushed to `origin`, and so is the
-`v1.x-final` tag, which is the recovery anchor for the working 1.x driver.
+`v1.x-final` tag, which is the recovery anchor for the working 1.x driver. It
+is an **annotated** tag: the tag object is `7c0cf2c` and it points at commit
+`33d4ff2`. `git ls-remote --tags origin` shows both, so the remote agrees.
 
 **P2 is validated, not merely done.** The golden corpus was audited rather
 than trusted: all 15 original streams are reproduced byte-for-byte by the
@@ -34,6 +36,30 @@ the real prototype. The layout harness came first and is the thing to keep
 green — `probe/layout_probe.c` plus `tests/layout.rs` check every field
 offset, and `tests/symbols.rs` checks every symbol against the installed
 library. `docs/PAPPL-SYMBOLS.md` carries the Q-1 symbol table.
+
+## Step numbering
+
+Two numbering schemes have been in use: the plan's own, and the one in the
+prompt series the work is driven from. **The plan's numbering is authoritative
+from here on**, in the documents and in every report. The mapping below covers
+the steps where the two are known to differ or to coincide; blanks are steps
+the prompt series has not named, and are left blank rather than guessed.
+
+| Plan | What it covers | Prompt series |
+|---|---|---|
+| P1 | Repository audit and migration plan (`docs/MIGRATION-PLAN.md`) | — |
+| P2 | Golden-file harness, and its validation | P2 |
+| P3 | `pappl-sys`: hand-written FFI **and** the size/offset/enum layout harness | P3 + P6 |
+| P4 | `pappl`: the safe wrapper and the `catch_unwind` callback shim | P7 |
+| P5 | Minimal PAPPL app; the printable-area vs full-media experiment (`docs/MARGINS.md`) | — |
+| P9 | Raster-type decision, and the dithering-exposure question | — |
+| P11 | The gate after which the frozen 1.x filter may be removed (Q-5) | — |
+| P12 | Hardware bring-up; release gate G-1, the physical margin measurement | P12 |
+
+The prompt series splits P3 into the bindings (its P3) and their layout tests
+(its P6); the plan keeps them in one step because the harness had to exist
+before the first declaration. Where older documents in this repository say
+P11 or P12, they mean the rows above.
 
 **What to do next.** Continue P3 into P4: the `pappl` safe wrapper, whose
 entire reason for existing is to own the `unsafe` surface and the

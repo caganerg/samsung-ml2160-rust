@@ -12,7 +12,7 @@ Files: src/spl.rs
        src/main.rs
        ppd/samsung-ml2160.ppd
 Copyright: 2025-2026 Çağan ERGÜN <73942784+caganerg@users.noreply.github.com>
-           Aurélien Croc (AP²C) and the OpenPrinting SpliX contributors
+           2006-2008 Aurélien Croc (AP²C) <aurelien@ap2c.org>
 License: GPL-2
  These three files carry material transcribed from OpenPrinting SpliX
  (https://github.com/OpenPrinting/splix), which is GPL-2.0-only. They are
@@ -38,11 +38,15 @@ License: GPL-2
  implements the CUPS Raster container format, and golden.rs is this project's
  own test harness. Each mentions SpliX once, as a cross-reference rather than
  as transcribed material.
-Comment: The upstream attribution above names the SpliX author and project but
- omits the year range, because the exact copyright notice must be transcribed
- from the SpliX source headers and no copy of that source was available on the
- machine where this stanza was written. Before the first upload, copy the
- notice verbatim from the upstream tree.
+Comment: The upstream notice was transcribed from the SpliX 2.0.1 source
+ (Debian source package splix 2.0.1-1, from http://splix.ap2c.org/). Every
+ file this project draws from — qpdl.cpp, compress.cpp, algo0x11.cpp,
+ document.cpp, printer.cpp and request.cpp — carries the same header line,
+ "(C) 2006-2008, Aurélien Croc (AP²C)", and the package's own debian/copyright
+ names Aurélien Croc <aurelien@ap2c.org> as the upstream author under GPL
+ version 2 only. The PPD values come from ppd/samsung.drv.in and the defs it
+ imports, headed "(C) 2007, Aurélien Croc (AP²C)", which the range above
+ covers.
 
 Files: crates/pappl-sys/*
        crates/pappl/*

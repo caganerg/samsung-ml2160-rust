@@ -18,6 +18,7 @@
  *   T <name> <size> <align>
  *   F <type>.<field> <offset> <size>
  *   E <name> <value>
+ *   V <name> <value>
  */
 
 #include <pappl/pappl.h>
@@ -30,6 +31,16 @@
 
 int main(void)
 {
+  /*
+   * The CUPS version whose headers defined cups_page_header2_t for this
+   * build. That struct is embedded by value at the start of
+   * pappl_pr_options_t, so its layout is part of PAPPL's ABI even though it
+   * belongs to CUPS. See risk R-6 in docs/MIGRATION-PLAN.md.
+   */
+  printf("V CUPS_VERSION_MAJOR %d\n", CUPS_VERSION_MAJOR);
+  printf("V CUPS_VERSION_MINOR %d\n", CUPS_VERSION_MINOR);
+  printf("V CUPS_VERSION_PATCH %d\n", CUPS_VERSION_PATCH);
+
   /* ---- types we declare ------------------------------------------------ */
   TYPE(pappl_pr_driver_data_t);
   TYPE(pappl_pr_options_t);

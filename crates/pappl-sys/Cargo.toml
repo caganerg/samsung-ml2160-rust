@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
 [package]
 name = "pappl-sys"
 version = "0.1.0"

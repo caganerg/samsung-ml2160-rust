@@ -98,6 +98,45 @@ PAPPL delivers `cupsWidth`/`cupsHeight` and scanlines for the *printable area*
 or the *full media*. To be answered by experiment, not documentation, and
 written up in `docs/MARGINS.md`.
 
+#### Q-2 follow-up — upstream says ML-2165 has a different margin
+
+Found on 2026-09-05 while fetching the SpliX source to settle the copyright
+attribution, and recorded here because it bears directly on R-1 and on which
+printer gate G-1 should be measured against.
+
+SpliX's `ppd/samsung.drv.in` puts the ML-2165 (and ML-1915) in their own block
+with an explicit override:
+
+```
+// ML-1915/ML-2165 printers (different margins than the other monochrome
+// printers)
+{
+    HWMargins 12.5 12.5 12.5 12.5
+```
+
+while the ML-2160 sits in the general monochrome group, whose defs set
+`HWMargins 12 12 12 12` (`ppd/spl2bandedjbig.defs`). Our
+`ppd/samsung-ml2160.ppd` declares 12 pt for every medium and is named for the
+whole "ML-2160 Series", and the README advertises ML-2165/2165W.
+
+Half a point sounds negligible and is not: `hard_margin_bytes` rounds up to a
+whole 8-pixel column, so 12 pt gives 13 bytes at 600 dpi and 12.5 pt gives 14 —
+a one-byte, 8-pixel, ~0.34 mm shift, and two bytes at 1200 dpi. That is exactly
+the R-1 failure mode, and it would look like a correctly printed page.
+
+**Not changed, deliberately.** Changing the margin table changes the bytes sent
+to the printer and moves every golden; and upstream's `.drv` is evidence about
+the hardware, not proof — SpliX's own PPDs for this family were derived without
+access to every model either. The decision this needs is the user's, informed by
+a measurement. Two consequences follow now:
+
+* **Gate G-1 must record which model was measured.** Measuring an ML-2160 says
+  nothing about the ML-2165's margin, and vice versa.
+* **If the two models really differ, one PPD-derived margin table cannot serve
+  both.** The PAPPL driver-capability table would need per-model margins, which
+  is straightforward there but impossible in the single classic PPD — an
+  argument in favour of the migration, not against it.
+
 ### Q-3 — Duplex
 **Decision: out of scope for 2.0, but advertise `sides-supported` explicitly as
 one-sided only rather than omitting the attribute.**
@@ -206,14 +245,28 @@ is the only way to keep them linkable. If this is ever revisited, the question
 to answer first is not "should we relicense" but "can we", and today the
 answer is no.
 
-**Actions this decision carries.** Done now: `LICENSE-APACHE` and `LICENSE-MIT`
-at the repository root, and the per-crate split recorded in
-`packaging/debian/copyright`. Outstanding, and only actionable once the crates
-exist (they do not yet — nothing under `crates/` has been written): the
-`license = "Apache-2.0 OR MIT"` field in both crates' `Cargo.toml`, and an
-`SPDX-License-Identifier: Apache-2.0 OR MIT` header on every file in them.
-Every other file in the tree stays `GPL-2.0-only`; the SPDX-header gap
-recorded in the audit table below is unchanged and still open.
+**Confirmed and applied 2026-09-05, after `pappl-sys` was written.** The
+alternative — making the FFI crates `GPL-2.0-only` like the rest — was
+considered and rejected. Beyond the reuse argument, it sits badly with what
+`pappl-sys` actually contains: its declarations are transcribed from
+Apache-2.0 licensed PAPPL headers, and stamping a GPL-2.0-only notice on a
+file whose substance is a transcription of someone else's Apache-2.0 header is
+not a claim worth making. The dual licence keeps the MIT arm that a
+GPL-2.0-only binary needs and the Apache-2.0 arm that matches where the
+material came from.
+
+Applied: `LICENSE-APACHE` and `LICENSE-MIT` at the repository root, the
+per-crate split in `packaging/debian/copyright`,
+`license = "Apache-2.0 OR MIT"` in `crates/pappl-sys/Cargo.toml`, and an
+`SPDX-License-Identifier` header on every file of that crate — `src/lib.rs`,
+`build.rs`, `probe/layout_probe.c`, `tests/layout.rs`, `tests/symbols.rs` and
+the manifest itself. The `pappl` wrapper crate carries the same headers from
+its first commit.
+
+Every other file in the tree stays `GPL-2.0-only`. The SPDX-header gap on the
+GPL files recorded in the audit table below is unchanged and still open: those
+headers are a separate, mechanical pass over `src/*.rs` and the PPD (Q-8b),
+not part of this decision.
 
 The audit that led here — the repository's licence was checked before
 anything was assigned:

@@ -109,8 +109,24 @@ pub struct cups_option_t {
 /// They must not be confused.
 #[repr(C, align(4))]
 pub struct cups_page_header2_t {
-    pub opaque: [u8; 1796],
+    pub opaque: [u8; CUPS_PAGE_HEADER2_SIZE],
 }
+
+/// Size of `cups_page_header2_t` as measured against CUPS
+/// [`CUPS_ABI_MAJOR`].[`CUPS_ABI_MINOR`].
+///
+/// Hardcoded here and checked by `tests/layout.rs` against the probe.
+pub const CUPS_PAGE_HEADER2_SIZE: usize = 1796;
+
+/// The CUPS major version this crate's `cups_page_header2_t` was measured
+/// against. See risk R-6: the struct belongs to CUPS, not PAPPL, and PAPPL
+/// embeds it by value at the start of `pappl_pr_options_t`, so a libcups
+/// release that changed its layout would move every field after it — without
+/// changing any symbol, and therefore without changing any dependency the
+/// linker can record.
+pub const CUPS_ABI_MAJOR: u32 = 2;
+/// See [`CUPS_ABI_MAJOR`].
+pub const CUPS_ABI_MINOR: u32 = 4;
 
 // ============================================================================
 // Scalar typedefs — `base.h`, `printer.h`, `device.h`, `job.h`, `system.h`

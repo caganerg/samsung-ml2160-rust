@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
 [workspace]
 # The 1.x filter stays the root package until P11 is green (decision Q-5);
 # the 2.0 crates are added here as they are written.

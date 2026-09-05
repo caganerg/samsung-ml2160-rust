@@ -85,14 +85,60 @@ installed library; `cargo test -p pappl-sys` re-checks this on every run.
 | `papplLogPrinter` | `log.h` | yes |
 | `papplCopyString` | `base.h` | yes |
 
+## The libcups ABI underneath PAPPL
+
+Recorded on 2026-09-05 because PAPPL's ABI is not entirely PAPPL's own.
+
+| What | Value |
+|---|---|
+| Installed PAPPL | `libpappl-dev` / `libpappl1t64` 1.3.1-2.1+b2, soname `libpappl.so.1` |
+| libcups it links | `libcups.so.2` (from its `NEEDED` entries), provided by `libcups2t64` 2.4.10-3+deb13u2 |
+| Headers the probe measured | `libcups2-dev` / `libcupsimage2-dev` 2.4.10-3+deb13u2 — `CUPS_VERSION_MAJOR` 2, `CUPS_VERSION_MINOR` 4, `CUPS_VERSION_PATCH` 10 |
+| `sizeof(cups_page_header2_t)` measured | **1796 bytes**, 4-byte aligned |
+
+`pappl_pr_options_t` embeds that struct **by value as its first member**, so
+the CUPS raster header's layout is part of the ABI this crate compiles
+against. `pappl-sys` pins it as `CUPS_PAGE_HEADER2_SIZE`, `CUPS_ABI_MAJOR` and
+`CUPS_ABI_MINOR`, and `tests/layout.rs` checks all three against the probe on
+every build.
+
+Three observations decide how much protection the dependency chain gives, and
+the answer is: less than it looks.
+
+1. **The binary records no libcups dependency.** We use the struct's layout but
+   call no libcups function, so the linker's `--as-needed` drops `-lcups`.
+   Verified by linking a binary against this crate and reading its `NEEDED`
+   entries: `libpappl.so.1`, `libgcc_s.so.1`, `libc.so.6` — no `libcups.so.2`.
+   `${shlibs:Depends}` therefore names no libcups package at all, which is why
+   `packaging/debian/control` states the dependency by hand.
+2. **Debian's `libpappl1t64` ships a symbols file**, whose entries are of the
+   form `_papplClientCreate@Base 1.0.1`. Symbols files version *symbols*; a
+   struct layout change with unchanged symbols moves no entry and bumps no
+   dependency.
+3. **Whether `libpappl.so.1`'s soname would necessarily change** if its public
+   struct layout changed underneath it could not be established from anything
+   installed here. CUPS itself does treat this struct as major-version ABI —
+   PAPPL's own `printer.h` selects `cups_page_header2_t` or
+   `cups_page_header_t` on `#if CUPS_VERSION_MAJOR < 3`, and CUPS 3 moves to
+   `libcups.so.3` — but that is CUPS's soname, not PAPPL's.
+
+Undetermined is treated as exposed, so this is risk **R-6** in
+`docs/MIGRATION-PLAN.md` rather than a documentation note. No runtime check is
+possible: neither library exports its own `sizeof`, and libcups exports no
+runtime version accessor — `httpGetVersion` reports the HTTP protocol version,
+not the library's. The runtime backstop is the driver's own geometry
+validation, which refuses a job whose option fields are implausible instead of
+printing from them.
+
 ## Types and constants
 
 The same discipline covers data, where the risk is worse: a wrong field offset
 corrupts memory silently instead of failing to link. `probe/layout_probe.c`
 prints the size and alignment of all 8 types this crate declares, the offset
-and size of all 128 fields, and the value of all 69 constants and limits;
-`tests/layout.rs` checks every one of those 205 records against the Rust
-declarations and fails if any record is left unchecked.
+and size of all 128 fields, the value of all 69 constants and limits, and the
+CUPS version that defined the raster header; `tests/layout.rs` checks every one
+of those 208 records against the Rust declarations and fails if any record is
+left unchecked.
 
 The `cups_page_header2_t` embedded in `pappl_pr_options_t` is held as opaque
 storage of the probed size (1796 bytes) for now. Its individual raster fields
