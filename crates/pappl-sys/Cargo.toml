@@ -1,0 +1,12 @@
+[package]
+name = "pappl-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI declarations for libpappl 1.3 (Printer Application Framework)"
+license = "Apache-2.0 OR MIT"
+links = "pappl"
+publish = false
+
+[dependencies]
+
+[build-dependencies]
