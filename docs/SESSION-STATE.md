@@ -1,51 +1,61 @@
 # Session State — Handover Note
 
-*Last updated 2026-09-05.*
+*Last updated 2026-09-05 (second session).*
 
-**Where things stand.** The repository has been audited end to end and the
-migration from the 1.x CUPS raster filter to a PAPPL Printer Application is
-planned but not started — no PAPPL code exists yet, and `libpappl-dev` is not
-even installed on the development machine (install
-`pkg-config libpappl-dev`; trixie has 1.3.1-2.1+b2, which is the agreed
-target). Three things are done. First, the audit itself:
-[`docs/MIGRATION-PLAN.md`](MIGRATION-PLAN.md) covers the current module layout,
-the SPL2 engine surface, hidden state, every printer option and where it is
-read, the proposed `spl2-core` / `pappl-sys` / `pappl` / `ml216x-printer-app`
-workspace split, licensing, and the top five ways this migration could silently
-corrupt output. Second, all eleven open questions have been answered and
-recorded in [`docs/DECISIONS.md`](DECISIONS.md), with the two exclusions
-written up in [`docs/NON-GOALS.md`](NON-GOALS.md); only **Q-8a**, the licence
-for the safe `pappl` wrapper, is still open, and it is blocked on a decision
-rather than on work — the SPDX audit it was waiting for is already in the
-decision log and recommends MIT. Third, and most important for what comes next,
-**P2 (the golden-file harness) is already complete** on branch
-`p2-golden-harness`: `src/golden.rs` plus 15 cases in `goldens/`, each with a
-`.spl` stream and a `.json` sidecar of the classic CUPS page header, including
-registration-mark cases on A4 and Letter at every supported resolution. It was
-verified by running the installed release binary over all 15 generated rasters;
-every one reproduces its golden exactly apart from the two pinned
-`SERVICEDATE` digits. 107 tests pass, `clippy --all-targets -D warnings` and
-`fmt --check` are clean. The tree before any of this is tagged `v1.x-final`.
+**Where things stand.** The migration plan, the decision log and the non-goals
+are complete and all eleven questions are answered — Q-8a, the last open one,
+was decided this session: `pappl-sys` and `pappl` are `Apache-2.0 OR MIT`,
+everything else `GPL-2.0-only`. `libpappl-dev` **is** installed
+(1.3.1-2.1+b2), so the previous note's claim that it is missing is out of
+date. Branch `migration/pappl` is pushed to `origin`, and so is the
+`v1.x-final` tag, which is the recovery anchor for the working 1.x driver.
 
-**What to do next, and what to read first.** The next task is **not** P2 — it
-is done and awaiting review; do not rebuild it. The immediate work is P3, the
-`pappl-sys` FFI bindings, which is blocked until `libpappl-dev` is installed
-and cannot begin before the headers are read (project rule 2 forbids inventing
-PAPPL signatures, so quote the real declaration from `/usr/include/pappl/*.h`
-for every symbol bound, and produce a table asserting no bound symbol is newer
-than 1.3). Two smaller items should be cleared first because they are cheap and
-already agreed: `src/golden.rs` and `goldens/README.md` were written in Turkish
-before the English-everywhere decision (Q-11) and need converting, and
-`ppd/samsung-ml2160.ppd` needs its GPL-2 header (Q-8b). A fresh agent should
-read, in order: this file, then `docs/DECISIONS.md` for what was settled and
-why, then `docs/MIGRATION-PLAN.md` sections 7 and 9 for the target layout and
-the corruption risks, then `goldens/README.md` and `src/golden.rs` to
-understand how output is verified, and finally `src/main.rs` around lines
-367–460 (`compute_page_width_pixels`, `hard_margin_bytes`, `band_placement`)
-and `src/spl.rs` around lines 820–1080 (`begin_job`, `begin_page`,
-`write_compressed_band`, `end_page`, `end_job`) — that is where the
-byte-for-byte behaviour actually lives. The three deferred investigations, none
-blocking, are listed at the end of `docs/MIGRATION-PLAN.md`: the
-printable-area-vs-full-media margin experiment for `docs/MARGINS.md`, the
-dithering-exposure question for `docs/SECURITY-REVIEW.md`, and confirming the
-unpatched overflow lines in PAPPL 1.3.1's source before filing a Debian bug.
+**P2 is validated, not merely done.** The golden corpus was audited rather
+than trusted: all 15 original streams are reproduced byte-for-byte by the
+untouched `v1.x-final` binary (only the two pinned `SERVICEDATE` digits
+differ), and each of the five migration risks was injected as a one-line
+defect to confirm the suite goes red. R-5 — a reordered job-level PJL line —
+is caught by the golden corpus and by nothing else in the repository. The full
+record is `docs/GOLDEN-VALIDATION.md`, and `CONTRIBUTING.md` states the bless
+discipline that follows from it.
+
+**The corpus is now 32 cases**, closing the gaps that could only be captured
+while the 1.x encoder runs: `dst_offset > 0` (two synthetic cases, the branch
+that sits directly on R-1), all eleven PPD media sizes, Legal and Folio at
+every resolution, multi-page combined with multi-copy and the copy clamp, and
+a non-ASCII job title. `goldens/SHA256SUMS` pins the validated bytes. The
+band-order ceiling is proved across the whole matrix (worst case Legal
+@1200x1200, 129 of 256 bands) with a compile-time assertion bounding it from
+the validator's limits.
+
+**P3 has started.** `crates/pappl-sys` holds hand-written FFI for PAPPL 1.3:
+8 types, 128 fields, 69 constants and 45 functions, every declaration quoting
+the real prototype. The layout harness came first and is the thing to keep
+green — `probe/layout_probe.c` plus `tests/layout.rs` check every field
+offset, and `tests/symbols.rs` checks every symbol against the installed
+library. `docs/PAPPL-SYMBOLS.md` carries the Q-1 symbol table.
+
+**What to do next.** Continue P3 into P4: the `pappl` safe wrapper, whose
+entire reason for existing is to own the `unsafe` surface and the
+`catch_unwind` shim every callback must pass through (rule 5). Two things are
+deliberately left for when they are needed: the fields of
+`cups_page_header2_t` (bound as opaque storage today) and `cups_option_t`
+(opaque pointer) — both are CUPS headers and get the same transcription plus
+probe treatment. Also outstanding: SPDX headers and `license` fields for the
+FFI crates as they are created, the GPL-2 header on the PPD (Q-8b), and the
+exact SpliX copyright notice in `debian/copyright`, which needs a copy of the
+upstream source to transcribe.
+
+**Release gate G-1 is open and blocks 2.0.** R-1 — the hard margin — is
+validated only against itself until a registration-mark page is printed on
+real hardware and measured against the PPD's `*ImageableArea`. No printer is
+attached to this machine. The gate lands in P12; see
+`docs/GOLDEN-VALIDATION.md` §4.
+
+**Reading order for a fresh agent:** this file, then `docs/DECISIONS.md`,
+`docs/GOLDEN-VALIDATION.md` and `CONTRIBUTING.md`, then
+`docs/MIGRATION-PLAN.md` §7 and §9 for the target layout and the corruption
+risks, then `goldens/README.md` and `src/golden.rs`. The byte-for-byte
+behaviour itself lives in `src/main.rs` around `compute_page_width_pixels`,
+`hard_margin_bytes` and `band_placement`, and in `src/spl.rs` around
+`begin_job`, `begin_page`, `write_compressed_band`, `end_page` and `end_job`.
