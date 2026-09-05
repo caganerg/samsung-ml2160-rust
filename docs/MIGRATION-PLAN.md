@@ -577,6 +577,7 @@ the index.
 | Q-5 | Clean break | Approved for what we **ship**, not for what we **delete**. 1.x code frozen in-tree until P11 is green; the PPD stays permanently as project data. Delete list needs separate approval. |
 | Q-6 | Keep `raster.rs`? | **Keep**, behind a non-default Cargo feature `golden-replay` — *not* `#[cfg(test)]`, which is invisible to integration tests in another crate. |
 | Q-7 | Static or dynamic linking | **Dynamic**, against the archive's `libpappl1t64`. Answered together with Q-1; never open. |
+| Q-8a | Licence for the FFI crates | **`Apache-2.0 OR MIT`** for both `pappl-sys` and `pappl`; `spl2-core` and `ml216x-printer-app` stay `GPL-2.0-only`. |
 | Q-8b | Missing PPD licence header | **Add a GPL-2 header.** More important now that the PPD is permanent project data. |
 | Q-9 | Golden-file fixtures | **Approved**, with JSON sidecars and a registration-mark corpus case. **Implemented** — see `src/golden.rs` and `goldens/`. |
 | Q-10 | Device transport | **USB first, socket second.** Do not defer socket past 2.0 without asking. |
@@ -584,15 +585,13 @@ the index.
 
 ### Still open
 
-**Q-8a — licence for the `pappl` safe wrapper.** Deliberately unassigned
-pending a decision. The audited SPDX state is in `docs/DECISIONS.md`: the
-project is unambiguously **`GPL-2.0-only`** (Cargo.toml, `src/spl.rs:8` and
-`packaging/debian/copyright` all agree; the `LICENSE` file's "any later
-version" wording is only the FSF boilerplate appendix). Because of that,
-Apache-2.0 for our own wrapper would be internally incompatible.
-**Recommendation: MIT.** A newly discovered wrinkle needs the same call:
-`pappl-sys` at plain Apache-2.0 has the identical problem, and the standard
-resolution is to dual-license it `Apache-2.0 OR MIT`.
+**Nothing.** Q-8a — the licence for the FFI crates — was the last open
+question and was decided on 2026-09-05: `pappl-sys` and `pappl` are both
+`Apache-2.0 OR MIT`, while `spl2-core` and `ml216x-printer-app` stay
+`GPL-2.0-only`. The MIT arm is what lets a GPL-2.0-only binary link them
+without inheriting Apache-2.0's "further restrictions" under GPLv2 §6. See
+`docs/DECISIONS.md`, Q-8a, for the reasoning and for the actions it leaves
+outstanding until the crates exist.
 
 ### Deferred to a later step, not blocking
 

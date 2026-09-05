@@ -6,6 +6,16 @@ can be reconstructed from the tree alone.
 
 Questions are numbered as they were raised in `docs/MIGRATION-PLAN.md`.
 
+**On the numbering.** Eleven questions were raised, Q-1 to Q-11, and none was
+skipped. There are twelve entries below because Q-8 asked two unrelated things
+in one paragraph — the licence for the FFI crates and the missing licence
+header on the PPD — and was split into **Q-8a** and **Q-8b** when it was
+answered. **Q-7 exists and is decided:** it asked whether the .deb should link
+libpappl statically or dynamically, and it is answered under Q-7 below (and
+folded into Q-1, which settled the same matter). Counting the decided entries
+as ten and treating Q-7 as unaccounted for is the arithmetic slip this note
+exists to prevent.
+
 ---
 
 ## 2026-09-05
@@ -137,9 +147,38 @@ whole package on PAPPL's linking exception, on top of the packaging costs
 listed under Q-1. The 1.x musl static build does not carry over to 2.0.
 
 ### Q-8a — Licence for the `pappl` safe wrapper
-**Status: NOT YET ASSIGNED — pending decision. SPDX state reported below.**
+**Decision (2026-09-05): both FFI crates are licensed `Apache-2.0 OR MIT`.**
+`pappl-sys` and `pappl` both carry the standard Rust dual licence;
+`spl2-core` and `ml216x-printer-app` stay `GPL-2.0-only`.
 
-The repository's licence was audited before assigning anything:
+The MIT arm is what makes the arrangement work: plain Apache-2.0 on either
+crate would create the same internal incompatibility, because an Apache-2.0
+crate linked into a GPL-2.0-only binary imposes the patent-termination and
+notice terms that GPLv2 section 6 treats as "further restrictions", and
+PAPPL's linking exception covers PAPPL's own code, not ours. A GPL-2.0-only
+consumer — this project's binary — takes the MIT arm and the conflict
+disappears; the Apache-2.0 arm preserves the "match upstream" intent for
+anyone reusing the bindings elsewhere. Dual-licensing is also what the wider
+Rust ecosystem expects of a `-sys` crate, so it costs nothing in reusability.
+
+This is a practical licensing convention, not legal advice. Note also that it
+is only a question because the project is GPL-2.0-**only**: relicensing the
+repository as `GPL-2.0-or-later` would make the Apache-2.0 incompatibility
+moot, since Apache-2.0 is compatible with GPLv3. That relicence is not
+proposed here — `spl.rs` is derived from GPLv2-only SpliX, so it is not ours
+to make unilaterally — but it is the lever to pull if this is ever revisited.
+
+**Actions this decision carries.** Done now: `LICENSE-APACHE` and `LICENSE-MIT`
+at the repository root, and the per-crate split recorded in
+`packaging/debian/copyright`. Outstanding, and only actionable once the crates
+exist (they do not yet — nothing under `crates/` has been written): the
+`license = "Apache-2.0 OR MIT"` field in both crates' `Cargo.toml`, and an
+`SPDX-License-Identifier: Apache-2.0 OR MIT` header on every file in them.
+Every other file in the tree stays `GPL-2.0-only`; the SPDX-header gap
+recorded in the audit table below is unchanged and still open.
+
+The audit that led here — the repository's licence was checked before
+anything was assigned:
 
 | Source | States | Agrees? |
 |---|---|---|
@@ -169,12 +208,11 @@ the entire point of not making it GPL; and it avoids the Apache-2.0 patent
 clause that causes the incompatibility. `GPL-2.0-or-later` would also link
 cleanly but would defeat the reuse goal.
 
-**Newly discovered wrinkle, needs a decision:** `pappl-sys` at plain Apache-2.0
-has the *same* problem as the wrapper, for the same reason — it would be linked
-into the GPL-2.0-only binary. The standard Rust resolution is to dual-license
-it **`Apache-2.0 OR MIT`**, so the GPL-2.0-only binary takes the MIT arm while
-the Apache-2.0 arm preserves the "match upstream" intent. Recommended, but not
-applied, because Q-8a was approved as "pappl-sys stays Apache-2.0".
+The wrinkle that this recommendation missed, and that the decision above
+resolves: `pappl-sys` at plain Apache-2.0 had the *same* problem as the
+wrapper, for the same reason — it too would be linked into the GPL-2.0-only
+binary. The earlier approval of "pappl-sys stays Apache-2.0" was taken before
+that was noticed and is superseded; both crates are now `Apache-2.0 OR MIT`.
 
 ### Q-8b — Missing licence header on the PPD
 **Decision: add a GPL-2 header to `ppd/samsung-ml2160.ppd`.**
