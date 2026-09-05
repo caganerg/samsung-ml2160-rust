@@ -141,6 +141,35 @@ enables the feature explicitly, and CI builds both with and without it.
 ### Q-7 — Static or dynamic linking for the .deb
 **Decision: dynamic, against the archive's `libpappl1t64`.**
 
+**Consequence, recorded so it is not rediscovered as a surprise: the artifact
+stops being portable across distributions, and the target release becomes a
+hard constraint rather than a preference.**
+
+The 1.x package is a static musl binary with no libc dependency: it runs on
+any Linux with a compatible kernel, whatever the distribution. The 2.0 package
+does not. It links dynamically against glibc and against `libpappl1t64`, so it
+runs only where both are present at compatible versions, and `${shlibs:Depends}`
+will encode exactly that.
+
+**The .deb targets Debian 13 (trixie)**, which ships `libpappl-dev` /
+`libpappl1t64` 1.3.1-2.1+b2 — the version this project is developed and tested
+against. Forky and sid carry the same 1.3.1-2.1, so they are expected to work
+without change. Older releases are out of scope: the runtime package name
+`libpappl1t64` comes from the 64-bit `time_t` transition, so a build for a
+release predating that transition would need its own dependency name and its
+own verification, and is not something this package claims. Building for a
+different release means rebuilding there, not copying the .deb.
+
+**The 1.x static binary remains the only build that runs anywhere**, which is
+one more reason Q-5 keeps the 1.x filter in the tree and tagged `v1.x-final`
+rather than deleting it: it is the fallback for any system the 2.0 package
+cannot target.
+
+This is the right trade for a package intended for the Debian archive — the
+archive builds each release against its own libraries, and `${shlibs:Depends}`
+is how that is expressed — but it is a real capability loss compared with 1.x
+and it is stated here deliberately.
+
 Answered together with Q-1; it is not an open question. Statically linking
 libpappl would put Apache-2.0 code inside a GPL-2.0-only binary and rest the
 whole package on PAPPL's linking exception, on top of the packaging costs
@@ -161,12 +190,21 @@ disappears; the Apache-2.0 arm preserves the "match upstream" intent for
 anyone reusing the bindings elsewhere. Dual-licensing is also what the wider
 Rust ecosystem expects of a `-sys` crate, so it costs nothing in reusability.
 
-This is a practical licensing convention, not legal advice. Note also that it
-is only a question because the project is GPL-2.0-**only**: relicensing the
-repository as `GPL-2.0-or-later` would make the Apache-2.0 incompatibility
-moot, since Apache-2.0 is compatible with GPLv3. That relicence is not
-proposed here — `spl.rs` is derived from GPLv2-only SpliX, so it is not ours
-to make unilaterally — but it is the lever to pull if this is ever revisited.
+This is a practical licensing convention, not legal advice.
+
+**The MIT arm is necessary, not merely convenient.** The obvious escape from
+the incompatibility would be to relicense this repository as
+`GPL-2.0-or-later`, since Apache-2.0 is compatible with GPLv3 — but that
+escape is not available to us unilaterally. `src/spl.rs` is derived from
+OpenPrinting SpliX, which is GPLv2-**only**, and `src/main.rs` and the PPD
+carry transcribed SpliX values as well (see the SpliX stanza in
+`packaging/debian/copyright`). A derived work cannot be relicensed under terms
+its upstream did not offer, and SpliX offers no "or later" clause. Only the
+SpliX copyright holders could grant that. So the project is GPL-2.0-only for
+as long as it contains SpliX-derived code, and dual-licensing the FFI crates
+is the only way to keep them linkable. If this is ever revisited, the question
+to answer first is not "should we relicense" but "can we", and today the
+answer is no.
 
 **Actions this decision carries.** Done now: `LICENSE-APACHE` and `LICENSE-MIT`
 at the repository root, and the per-crate split recorded in

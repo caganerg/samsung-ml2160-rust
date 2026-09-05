@@ -60,13 +60,22 @@ defect, one at a time, into a scratch worktree, and the full suite was run:
 All five are caught, and the golden corpus catches all five on its own. R-5 is
 caught by **nothing else**: reordering `@PJL SET ALTITUDE=LOW` and `@PJL SET
 DENSITY=3` leaves all 106 other tests green. That is the case for keeping the
-corpus in CI rather than relying on unit tests.
+corpus in CI rather than relying on unit tests, and it is why `CONTRIBUTING.md`
+makes refreshing a golden a reviewed act rather than a build step.
+
+**Re-run against the enlarged corpus (32 cases).** All five defects are still
+caught, and the number of tests catching each is unchanged — 6, 4, 4, 2 and 1
+respectively. That is expected rather than disappointing: all 32 cases live
+inside the single `golden::test_goldens_match` test, so widening the corpus
+deepens the evidence behind that one test (more geometries, more resolutions,
+the positive `dst_offset` branch) without adding new test names to the failure
+list.
 
 ## 3. Coverage, and what is not covered
 
-Covered by the 15 cases:
+As first captured, the 15 cases covered:
 
-| Axis | Covered |
+| Axis | Covered by the original 15 |
 |---|---|
 | Media | A4, Letter, A5, EnvC5 |
 | Resolution | 300×300, 600×600, 1200×600, 1200×1200 (A4 and Letter at all four) |
@@ -78,28 +87,43 @@ Covered by the 15 cases:
 | Input encoding | `RaS3` uncompressed and `RaS2` line-RLE (identical output asserted) |
 | Content | four 1-pixel corner registration marks, and one blank page |
 
-Not covered, in rough order of how much it matters:
+The corpus now holds **32 cases**. What was missing, and what was done about
+it, follows.
 
-* **`band_placement`'s `dst_offset > 0` branch.** Every PPD medium has a 12 pt
-  margin, so `dst_offset` is 0 in all 15 cases and only `src_skip` varies (0 at
-  1200 dpi, 1 at 300/600 dpi). The positive-offset branch — a hard margin
-  smaller than the centring offset — is exercised by unit tests but frozen by
-  no golden.
-* **The other seven PPD media**: A6, B5, Env10, EnvDL, Executive, Folio, Legal.
-  Their `SplPaperSize` codes are covered by unit tests, not by golden bytes.
-* **Thirteen of the fifteen PPD media types** (`NORMAL`, `THICK`, `THIN`,
-  `BOND`, `CARD`, `COLOR`, `COTTON`, `LABEL`, `OHP`, `RECYCLED`, `ARCHIVE`,
-  `USED`, `OFF`) and the explicit `MediaPosition` 1 (Auto).
-* **Duplex page-header bytes.** All cases are Simplex, so the `0xB`/`0xC`
-  duplex and tumble bytes are frozen in one state only. Duplex is a non-goal
-  for 2.0 (`docs/NON-GOALS.md`), so this is a deliberate gap.
-* **Combinations**: multi-page × multi-copy together, and the
-  `sanitize_copies` clamp boundary.
-* **Compressor stress**: only corner marks and blank pages, so Algo 0x11's
-  literal/repeat paths run on very sparse data. The tallest case (A4 @1200 dpi)
-  is 107 bands, so the `u8` band-index ceiling at 256 bands is not approached.
-* **Untrusted job metadata**: job name and user are fixed ASCII, so
-  `quote_untrusted` is not exercised through this path.
+### Gaps closed on 2026-09-05
+
+The corpus was expanded from 15 to 32 cases; see `goldens/README.md` for the
+full list.
+
+* **`dst_offset > 0`** — two synthetic cases, at offsets 14 and 94. They
+  fabricate only the imageable area and keep A4's real sheet, because
+  `validate_page_header` rejects unknown paper sizes. This was the gap that
+  mattered: the positive branch is the one that activates the first time PAPPL
+  hands us a margin the PPD never produces, which is R-1.
+* **All eleven PPD media sizes**, plus Legal and Folio — the two geometric
+  extremes — at every supported resolution.
+* **Multi-page combined with multi-copy**, including the `sanitize_copies`
+  clamp (1000 requested, 999 written into both the page header and the
+  footer): the R-5 "copies counted twice" scenario.
+* **Non-ASCII job metadata**, freezing what `quote_untrusted` does with a UTF-8
+  title today — it transliterates to ASCII — before PAPPL starts passing IPP
+  job-names through unchanged.
+* **The band-order ceiling** is now proved across the whole matrix rather than
+  sampled: worst case Legal @1200x1200 at 129 bands of the 256 the field can
+  address, with a compile-time assertion bounding it from the validator's own
+  limits.
+
+### Accepted gaps
+
+These are deliberately left uncovered rather than filled:
+
+* **Media types beyond `ENV` and unset.** Thirteen of the fifteen PPD media
+  types map to a PJL `PAPERTYPE` string and nothing else; the mapping is
+  covered by unit tests against the PPD, and a golden per type would freeze
+  the same one-line difference fifteen times.
+* **Duplex page-header bytes `0xB`/`0xC`.** Every case is Simplex. Duplex is a
+  non-goal for 2.0 (`docs/NON-GOALS.md`) and cannot be validated without
+  hardware anyway; if it is ever implemented, the corpus grows with it.
 
 ## 4. Physical measurement — NOT DONE
 
@@ -112,3 +136,23 @@ derives its margin from the same 12 pt `*ImageableArea` value, so byte-for-byte
 agreement proves internal consistency and nothing about where toner lands on
 paper. Until one `*-marks` case is printed through the 1.x path and measured
 with a ruler, **R-1 is validated only against itself**.
+
+### Release gate G-1 — measure the margins on real hardware
+
+This is a **release gate, not a documentation note**. It is written here as a
+condition on shipping, so that a green test suite is never mistaken for a
+verified margin.
+
+> **G-1.** 2.0 does not ship until a registration-mark golden has been printed
+> on an ML-216x through the 1.x path and its margins measured against
+> `ppd/samsung-ml2160.ppd`'s `*ImageableArea` (12 pt = 4.23 mm on every
+> medium). The measured values, the medium and the resolution are recorded in
+> this document. If they disagree with the PPD, the hard-margin table is wrong
+> and every golden that depends on it is re-captured before 2.0 is built.
+
+The gate lands naturally in **P12**, which needs the printer connected anyway:
+the same session that prints the first PAPPL job can print the 1.x reference
+page and measure both. Until G-1 is satisfied, R-1 is carried as an open risk
+in every status report, and `docs/MARGINS.md` (the P5 printable-area
+experiment) does not close it — that experiment establishes what PAPPL
+delivers, not where the toner lands.
